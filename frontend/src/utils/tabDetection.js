@@ -4,16 +4,21 @@ class TabDetection {
     this.tabSwitchCount = 0;
     this.isTabActive = true;
     this.onTabSwitch = onTabSwitch;
+    this.fullscreenExitCount = 0;
     this.copyPasteCount = 0;
     this.rightClickCount = 0;
     this.windowResizeCount = 0;
     this.devToolsOpen = false;
     this.suspiciousActivities = [];
+    // Debouncing for tab switches to prevent double counting
+    this.lastTabSwitchTime = 0;
+    this.tabSwitchDebounceMs = 500; // Only count one switch per 500ms
     this.setupListeners();
   }
 
   setupListeners() {
-    // Visibility change detection
+    // Use visibilitychange as primary detection (most reliable)
+    // Only use blur as backup, and don't use keydown Alt+Tab to avoid triple counting
     document.addEventListener('visibilitychange', () => {
       if (document.hidden) {
         this.handleTabSwitch();
@@ -22,23 +27,77 @@ class TabDetection {
       }
     });
 
-    // Window blur/focus detection
+    // Window blur/focus detection - only use if visibilitychange didn't fire
+    // Add a small delay to check if visibilitychange already handled it
+    let blurTimeout;
     window.addEventListener('blur', () => {
-      this.handleTabSwitch();
+      // Only count if visibilitychange didn't already fire (check after a short delay)
+      blurTimeout = setTimeout(() => {
+        // If document is still hidden and we haven't counted recently, count it
+        if (document.hidden && (Date.now() - this.lastTabSwitchTime) >= this.tabSwitchDebounceMs) {
+          this.handleTabSwitch();
+        }
+      }, 100);
     });
 
     window.addEventListener('focus', () => {
+      clearTimeout(blurTimeout);
       this.isTabActive = true;
     });
 
+
     // Detect if user tries to leave fullscreen
-    document.addEventListener('fullscreenchange', () => {
-      if (!document.fullscreenElement) {
-        this.handleSuspiciousActivity('fullscreen_exit', {
-          timestamp: new Date().toISOString()
-        });
+    // Track fullscreen exit count separately with debouncing
+    this.lastFullscreenExitTime = 0;
+    this.fullscreenExitDebounceMs = 500;
+    let wasFullscreen = !!document.fullscreenElement || 
+                        !!document.webkitFullscreenElement || 
+                        !!document.mozFullScreenElement || 
+                        !!document.msFullscreenElement;
+    
+    const handleFullscreenChange = () => {
+      const isFullscreen = !!(document.fullscreenElement || 
+                              document.webkitFullscreenElement || 
+                              document.mozFullScreenElement || 
+                              document.msFullscreenElement);
+      
+      // Only count when transitioning from fullscreen to non-fullscreen
+      if (wasFullscreen && !isFullscreen) {
+        const now = Date.now();
+        const timeSinceLastExit = now - this.lastFullscreenExitTime;
+        
+        // Debounce: Only count if enough time has passed
+        if (timeSinceLastExit >= this.fullscreenExitDebounceMs) {
+          this.fullscreenExitCount++;
+          this.lastFullscreenExitTime = now;
+          
+          this.handleSuspiciousActivity('fullscreen_exit', {
+            count: this.fullscreenExitCount,
+            timestamp: new Date().toISOString()
+          });
+          
+          // Notify callback if available
+          if (this.onTabSwitch) {
+            this.onTabSwitch({
+              fullscreen_exit: true,
+              fullscreen_exit_count: this.fullscreenExitCount,
+              suspicious_activity: {
+                type: 'fullscreen_exit',
+                count: this.fullscreenExitCount,
+                timestamp: new Date().toISOString()
+              }
+            });
+          }
+        }
       }
-    });
+      
+      wasFullscreen = isFullscreen;
+    };
+    
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
+    document.addEventListener('mozfullscreenchange', handleFullscreenChange);
+    document.addEventListener('MSFullscreenChange', handleFullscreenChange);
 
     // Detect dev tools opening (using console detection)
     let devToolsOpen = false;
@@ -88,7 +147,17 @@ class TabDetection {
     });
 
     // Keyboard shortcuts detection (F12, Ctrl+Shift+I, etc.)
+    // Note: Alt+Tab is NOT handled here to avoid double counting
+    // It will be caught by visibilitychange and blur events
     document.addEventListener('keydown', (e) => {
+      // Windows key + Tab (Windows 10/11 task view) - only track if not already counted
+      if (e.key === 'Meta' || e.key === 'OSLeft' || e.key === 'OSRight') {
+        // Will be caught by visibilitychange/blur events, so we don't count here
+        // Just prevent default
+        e.preventDefault();
+        return false;
+      }
+      
       // F12 - Dev Tools
       if (e.key === 'F12') {
         this.handleDevTools();
@@ -158,9 +227,15 @@ class TabDetection {
   }
 
   handleTabSwitch() {
-    if (this.isTabActive) {
+    // Debounce: Only count if enough time has passed since last switch
+    const now = Date.now();
+    const timeSinceLastSwitch = now - this.lastTabSwitchTime;
+    
+    // Only count if tab was active AND enough time has passed (prevent double counting)
+    if (this.isTabActive && timeSinceLastSwitch >= this.tabSwitchDebounceMs) {
       this.tabSwitchCount++;
       this.isTabActive = false;
+      this.lastTabSwitchTime = now;
       
       this.recordSuspiciousActivity('tab_switch', {
         count: this.tabSwitchCount,
@@ -242,6 +317,7 @@ class TabDetection {
   getSuspiciousActivities() {
     return {
       tab_switches: this.tabSwitchCount,
+      fullscreen_exits: this.fullscreenExitCount || 0,
       copy_paste: this.copyPasteCount,
       right_clicks: this.rightClickCount,
       window_resizes: this.windowResizeCount,
@@ -249,10 +325,15 @@ class TabDetection {
       all_activities: this.suspiciousActivities
     };
   }
+  
+  getFullscreenExitCount() {
+    return this.fullscreenExitCount || 0;
+  }
 
   reset() {
     this.tabSwitchCount = 0;
     this.isTabActive = true;
+    this.fullscreenExitCount = 0;
     this.copyPasteCount = 0;
     this.rightClickCount = 0;
     this.windowResizeCount = 0;

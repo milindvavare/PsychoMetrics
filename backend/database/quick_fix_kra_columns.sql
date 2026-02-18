@@ -61,3 +61,5 @@ DEALLOCATE PREPARE stmt;
 
 SELECT 'Migration completed! Please verify the columns exist.' AS status;
 
+
+

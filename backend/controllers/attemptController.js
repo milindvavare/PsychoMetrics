@@ -2,6 +2,7 @@ const db = require('../config/database');
 const logger = require('../utils/logger');
 const { checkAttemptLimit, logIPAddress } = require('../middleware/antiCheat');
 const scoring = require('../utils/scoring');
+const integrityScoring = require('../utils/integrityScoring');
 const comprehensiveReportController = require('./comprehensiveReportController');
 const kraKpiCalculator = require('../utils/kraKpiCalculator');
 
@@ -338,57 +339,20 @@ const submitAttempt = async (req, res) => {
     const submittedAt = new Date();
     const timeTaken = Math.floor((submittedAt - startedAt) / 1000);
 
-    // Get updated attempt data with all fields
+    // Get updated attempt data with all fields (including latest violation counts)
     const [updatedAttempts] = await db.pool.execute(
-      'SELECT * FROM test_attempts WHERE id = ?',
+      `SELECT * FROM test_attempts WHERE id = ?`,
       [attempt_id]
     );
     const updatedAttempt = updatedAttempts[0] || attempt;
 
-    // Calculate violation score
-    let violationScore = 0;
-    let riskLevel = 'low';
-    
-    // Handle both old (tab_switches) and new (tab_switch_count) column names
+    // Get latest counts from database
     const tabSwitches = updatedAttempt.tab_switch_count || updatedAttempt.tab_switches || 0;
     const fullscreenExits = updatedAttempt.fullscreen_exit_count || 0;
     
-    violationScore += tabSwitches * 2;
-    violationScore += fullscreenExits * 3;
+    logger.info(`Attempt ${attempt_id} violation counts: ${tabSwitches} tab switches, ${fullscreenExits} fullscreen exits`);
 
-    // Check suspicious activity
-    const suspiciousActivity = updatedAttempt.suspicious_activity 
-      ? (typeof updatedAttempt.suspicious_activity === 'string' 
-          ? JSON.parse(updatedAttempt.suspicious_activity) 
-          : updatedAttempt.suspicious_activity)
-      : null;
-
-    if (suspiciousActivity) {
-      if (suspiciousActivity.copy) violationScore += 5;
-      if (suspiciousActivity.paste) violationScore += 5;
-      if (suspiciousActivity.right_click) violationScore += 3;
-      if (suspiciousActivity.dev_tools) violationScore += 10;
-    }
-
-    // Determine risk level
-    if (violationScore >= 20) riskLevel = 'high';
-    else if (violationScore >= 10) riskLevel = 'medium';
-
-    // Update attempt status with violation data
-    await db.query(
-      `UPDATE test_attempts 
-       SET status = 'completed', 
-           submitted_at = NOW(), 
-           time_taken_seconds = ?,
-           violation_score = ?,
-           tab_switch_count = ?,
-           fullscreen_exit_count = ?,
-           suspicion_risk_level = ?
-       WHERE id = ?`,
-      [timeTaken, violationScore, tabSwitches, fullscreenExits, riskLevel, attempt_id]
-    );
-
-    // Calculate all scores
+    // Calculate all scores first to get test score
     logger.info(`Calculating scores for attempt ${attempt_id}...`);
     const scoreData = await scoring.calculateAllScores(
       attempt_id,
@@ -397,14 +361,114 @@ const submitAttempt = async (req, res) => {
     );
     logger.info(`Scores calculated. Category scores: ${Object.keys(scoreData.category_scores || {}).length} categories`);
 
-    // Update scores table with violation score
-    await db.pool.execute(
-      `UPDATE scores 
-       SET violation_score = ?, risk_level = ?
-       WHERE attempt_id = ?`,
-      [violationScore, riskLevel, attempt_id]
+    // Calculate comprehensive integrity assessment (uses latest counts from database)
+    logger.info(`Calculating integrity assessment for attempt ${attempt_id}...`);
+    const integrityAssessment = await integrityScoring.calculateIntegrityAssessment(
+      attempt_id,
+      attempt.test_id,
+      scoreData.percentage_score
     );
-    logger.info(`Scores table updated with violation data`);
+    
+    const violationScore = integrityAssessment.riskScore;
+    const riskLevel = integrityAssessment.riskLevel;
+    const confidenceIndex = integrityAssessment.confidenceIndex;
+    const recommendation = integrityAssessment.recommendation;
+    
+    logger.info(`Integrity assessment completed:`);
+    logger.info(`  Tab Switches: ${tabSwitches}`);
+    logger.info(`  Fullscreen Exits: ${fullscreenExits}`);
+    logger.info(`  Risk Score: ${violationScore}`);
+    logger.info(`  Risk Level: ${riskLevel}`);
+    logger.info(`  Confidence Index: ${confidenceIndex}%`);
+    logger.info(`  Recommendation: ${recommendation.action} - ${recommendation.message}`);
+
+    // Update attempt status with violation data
+    // Ensure all counts and scores are properly stored
+    await db.pool.execute(
+      `UPDATE test_attempts 
+       SET status = 'completed', 
+           submitted_at = NOW(), 
+           time_taken_seconds = ?,
+           violation_score = ?,
+           tab_switches = ?,
+           tab_switch_count = ?,
+           fullscreen_exit_count = ?,
+           suspicion_risk_level = ?
+       WHERE id = ?`,
+      [timeTaken, violationScore, tabSwitches, tabSwitches, fullscreenExits, riskLevel, attempt_id]
+    );
+    
+    logger.info(`Attempt ${attempt_id} updated with: violation_score=${violationScore}, tab_switches=${tabSwitches}, fullscreen_exits=${fullscreenExits}, risk_level=${riskLevel}`);
+
+    // Update scores table with integrity assessment data
+    // Note: risk_level enum may need to be updated to include 'critical'
+    // For now, we'll map 'critical' to 'high' if the enum doesn't support it
+    const dbRiskLevel = riskLevel === 'critical' ? 'high' : riskLevel;
+    
+    // Prepare integrity recommendation JSON
+    const integrityRecommendationJson = JSON.stringify({
+      action: recommendation.action,
+      status: recommendation.status,
+      message: recommendation.message,
+      requiresReview: recommendation.requiresReview,
+      requiresRetest: recommendation.requiresRetest,
+      reviewReason: recommendation.reviewReason || null
+    });
+    
+    // Update scores table - use try/catch for fields that might not exist yet
+    try {
+      await db.pool.execute(
+        `UPDATE scores 
+         SET violation_score = ?, 
+             risk_level = ?,
+             recommendation_status = ?,
+             confidence_index = ?,
+             integrity_recommendation = ?
+         WHERE attempt_id = ?`,
+        [violationScore, dbRiskLevel, recommendation.status, confidenceIndex, integrityRecommendationJson, attempt_id]
+      );
+      logger.info(`Scores table updated with integrity assessment data`);
+    } catch (error) {
+      // If new fields don't exist, update without them (for backward compatibility)
+      if (error.message.includes('Unknown column')) {
+        logger.warn(`Some integrity fields not found, updating with available fields only`);
+        await db.pool.execute(
+          `UPDATE scores 
+           SET violation_score = ?, 
+               risk_level = ?,
+               recommendation_status = ?
+           WHERE attempt_id = ?`,
+          [violationScore, dbRiskLevel, recommendation.status, attempt_id]
+        );
+        logger.info(`Scores table updated (limited fields)`);
+      } else {
+        throw error;
+      }
+    }
+    
+    // Store full integrity assessment in attempt metadata for detailed reporting
+    const integrityMetadata = {
+      riskScore: violationScore,
+      riskLevel: riskLevel,
+      confidenceIndex: confidenceIndex,
+      recommendation: recommendation,
+      violations: integrityAssessment.violations,
+      timePatterns: {
+        rapidAnswering: integrityAssessment.timePatterns.rapidAnswering,
+        uniformPattern: integrityAssessment.timePatterns.uniformPattern,
+        unrealisticTime: integrityAssessment.timePatterns.unrealisticTime,
+        averageTimePerQuestion: integrityAssessment.timePatterns.averageTimePerQuestion,
+        flags: integrityAssessment.timePatterns.flags
+      }
+    };
+    
+    await db.pool.execute(
+      `UPDATE test_attempts 
+       SET metadata = JSON_SET(COALESCE(metadata, '{}'), '$.integrity_assessment', ?)
+       WHERE id = ?`,
+      [JSON.stringify(integrityMetadata), attempt_id]
+    );
+    logger.info(`Integrity assessment metadata stored`);
     
     // IMPORTANT: Wait a moment to ensure scores are fully committed to database
     // Then verify scores exist before proceeding with KRA/KPI calculation
@@ -508,14 +572,30 @@ const submitAttempt = async (req, res) => {
 
     logger.info(`Test attempt submitted: ${attempt_id} with violation score: ${violationScore}`);
 
+    // Format integrity report for response
+    const integrityReport = integrityScoring.formatIntegrityReport({
+      testScore: scoreData.percentage_score,
+      riskScore: violationScore,
+      riskLevel: riskLevel,
+      violations: integrityAssessment.violations,
+      timePatterns: integrityAssessment.timePatterns,
+      confidenceIndex: confidenceIndex,
+      recommendation: recommendation
+    });
+
     res.json({
       success: true,
       message: 'Test attempt submitted successfully',
       data: {
         attempt_id,
         score: scoreData,
-        violation_score: violationScore,
-        risk_level: riskLevel
+        integrity: {
+          riskScore: violationScore,
+          riskLevel: riskLevel,
+          confidenceIndex: confidenceIndex,
+          recommendation: recommendation,
+          report: integrityReport
+        }
       }
     });
   } catch (error) {
@@ -610,11 +690,47 @@ const getAttempt = async (req, res) => {
     );
 
     let score = null;
+    let integrity = null;
+    
     if (scores.length > 0) {
       score = scores[0];
       score.category_scores = typeof score.category_scores === 'string' 
         ? JSON.parse(score.category_scores) 
         : score.category_scores;
+      
+      // Build integrity assessment from score data
+      if (score.violation_score !== null || score.risk_level || score.confidence_index !== null) {
+        const integrityRecommendation = score.integrity_recommendation
+          ? (typeof score.integrity_recommendation === 'string'
+              ? JSON.parse(score.integrity_recommendation)
+              : score.integrity_recommendation)
+          : null;
+        
+        integrity = {
+          riskScore: score.violation_score || 0,
+          riskLevel: score.risk_level || 'low',
+          confidenceIndex: score.confidence_index,
+          recommendation: integrityRecommendation || {
+            action: 'flag_for_review',
+            status: score.recommendation_status || 'consider',
+            message: 'Review recommended'
+          }
+        };
+        
+        // If metadata has integrity assessment, use that for more details
+        if (attempts[0].metadata) {
+          const metadata = typeof attempts[0].metadata === 'string'
+            ? JSON.parse(attempts[0].metadata)
+            : attempts[0].metadata;
+          
+          if (metadata.integrity_assessment) {
+            integrity = {
+              ...integrity,
+              ...metadata.integrity_assessment
+            };
+          }
+        }
+      }
     }
 
     res.json({
@@ -622,7 +738,8 @@ const getAttempt = async (req, res) => {
       data: {
         ...attempts[0],
         answers: parsedAnswers,
-        score
+        score,
+        integrity
       }
     });
   } catch (error) {
@@ -635,10 +752,10 @@ const getAttempt = async (req, res) => {
   }
 };
 
-// Track tab switch
+// Track tab switch and fullscreen exit
 const trackTabSwitch = async (req, res) => {
   try {
-    const { attempt_id } = req.body;
+    const { attempt_id, tab_switch, fullscreen_exit } = req.body;
 
     if (!attempt_id) {
       return res.status(400).json({
@@ -647,22 +764,85 @@ const trackTabSwitch = async (req, res) => {
       });
     }
 
-    // Increment tab switch count
-    await db.query(
-      'UPDATE test_attempts SET tab_switches = tab_switches + 1 WHERE id = ?',
+    // Update both tab_switches and tab_switch_count for backward compatibility
+    if (tab_switch) {
+      await db.pool.execute(
+        `UPDATE test_attempts 
+         SET tab_switches = tab_switches + 1,
+             tab_switch_count = COALESCE(tab_switch_count, 0) + 1
+         WHERE id = ?`,
+        [attempt_id]
+      );
+      logger.info(`Tab switch tracked for attempt ${attempt_id}`);
+    }
+
+    // Track fullscreen exit
+    if (fullscreen_exit) {
+      await db.pool.execute(
+        `UPDATE test_attempts 
+         SET fullscreen_exit_count = COALESCE(fullscreen_exit_count, 0) + 1
+         WHERE id = ?`,
+        [attempt_id]
+      );
+      logger.info(`Fullscreen exit tracked for attempt ${attempt_id}`);
+    }
+
+    // Get current counts and suspicious activity
+    const [attempts] = await db.pool.execute(
+      `SELECT tab_switches, 
+              tab_switch_count, 
+              fullscreen_exit_count,
+              suspicious_activity
+       FROM test_attempts 
+       WHERE id = ?`,
       [attempt_id]
     );
 
-    // Get current count
-    const [attempts] = await db.pool.execute(
-      'SELECT tab_switches FROM test_attempts WHERE id = ?',
-      [attempt_id]
+    const attempt = attempts[0];
+    const tabSwitches = attempt.tab_switch_count || attempt.tab_switches || 0;
+    const fullscreenExits = attempt.fullscreen_exit_count || 0;
+
+    // Calculate violation score in real-time
+    const integrityScoring = require('../utils/integrityScoring');
+    const suspiciousActivity = attempt.suspicious_activity
+      ? (typeof attempt.suspicious_activity === 'string'
+          ? JSON.parse(attempt.suspicious_activity)
+          : attempt.suspicious_activity)
+      : null;
+
+    const { riskScore, violations } = integrityScoring.calculateViolationScore(
+      {
+        tab_switch_count: tabSwitches,
+        tab_switches: tabSwitches,
+        fullscreen_exit_count: fullscreenExits,
+        suspicious_activity: attempt.suspicious_activity
+      },
+      suspiciousActivity
     );
+
+    // Determine risk level
+    const riskLevel = integrityScoring.getRiskLevel(riskScore);
+
+    // Update violation_score and suspicion_risk_level in real-time
+    await db.pool.execute(
+      `UPDATE test_attempts 
+       SET violation_score = ?,
+           suspicion_risk_level = ?
+       WHERE id = ?`,
+      [riskScore, riskLevel, attempt_id]
+    );
+
+    logger.info(`Violation score updated for attempt ${attempt_id}: ${riskScore} (${riskLevel})`);
 
     res.json({
       success: true,
       data: {
-        tab_switches: attempts[0].tab_switches
+        tab_switches: tabSwitches,
+        tab_switch_count: tabSwitches,
+        fullscreen_exit_count: fullscreenExits,
+        violation_score: riskScore,
+        risk_level: riskLevel,
+        violations: violations
       }
     });
   } catch (error) {

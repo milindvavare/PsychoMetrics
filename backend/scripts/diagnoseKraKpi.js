@@ -195,3 +195,5 @@ async function diagnose(companyId = 1) {
 const companyId = process.argv[2] ? parseInt(process.argv[2]) : 1;
 diagnose(companyId);
 
+
+

@@ -252,30 +252,38 @@ const TestPage = () => {
     });
   };
 
-  // Track fullscreen exit
+  // Track fullscreen exit (TabDetection handles the counting, this is just for UI feedback)
   useEffect(() => {
+    let wasFullscreen = false;
+    let lastExitTime = 0;
+    const debounceMs = 500;
+    
     const handleFullscreenChange = () => {
-      if (!document.fullscreenElement && !document.webkitFullscreenElement && 
-          !document.mozFullScreenElement && !document.msFullscreenElement) {
-        if (attemptId) {
-          // Track fullscreen exit
-          api.post('/attempts/track-tab', {
-            attempt_id: attemptId,
-            fullscreen_exit: true,
-            suspicious_activity: {
-              type: 'fullscreen_exit',
-              timestamp: new Date().toISOString()
-            }
-          }).catch(err => console.error('Fullscreen exit tracking error:', err));
+      const isFullscreen = !!(document.fullscreenElement || 
+                              document.webkitFullscreenElement || 
+                              document.mozFullScreenElement || 
+                              document.msFullscreenElement);
+      
+      // Only show UI feedback when transitioning from fullscreen to non-fullscreen
+      if (wasFullscreen && !isFullscreen) {
+        const now = Date.now();
+        // Debounce UI feedback to prevent duplicate toasts
+        if (now - lastExitTime >= debounceMs) {
+          lastExitTime = now;
           
-          toast.error('⚠️ Fullscreen mode exited. Please return to fullscreen.');
-          
-          // Try to re-enter fullscreen after a delay
-          setTimeout(() => {
-            requestFullscreen();
-          }, 2000);
+          if (attemptId) {
+            // TabDetection already tracks and sends to backend, so we just show UI feedback
+            toast.error('⚠️ Fullscreen mode exited. Please return to fullscreen.');
+            
+            // Try to re-enter fullscreen after a delay
+            setTimeout(() => {
+              requestFullscreen();
+            }, 2000);
+          }
         }
       }
+      
+      wasFullscreen = isFullscreen;
     };
 
     document.addEventListener('fullscreenchange', handleFullscreenChange);
@@ -298,10 +306,15 @@ const TestPage = () => {
       // Get all suspicious activities from TabDetection
       const allActivities = tabDetectionRef.current?.getSuspiciousActivities() || {};
       
+      // Determine if this is a tab switch or fullscreen exit
+      const isTabSwitch = data.tab_switch !== false && !data.fullscreen_exit;
+      const isFullscreenExit = data.fullscreen_exit === true;
+      
       // API interceptor will automatically add candidate token
       await api.post('/attempts/track-tab', {
         attempt_id: attemptId,
-        tab_switch: true,
+        tab_switch: isTabSwitch,
+        fullscreen_exit: isFullscreenExit,
         suspicious_activity: {
           ...data.suspicious_activity,
           ...allActivities,
@@ -309,8 +322,10 @@ const TestPage = () => {
         }
       });
       
-      if (data.suspicious_activity?.type === 'tab_switch') {
+      if (data.suspicious_activity?.type === 'tab_switch' || isTabSwitch) {
         toast.warning(`⚠️ Tab switch detected (${allActivities.tab_switches || 0} total). This is being recorded.`);
+      } else if (data.suspicious_activity?.type === 'fullscreen_exit' || isFullscreenExit) {
+        toast.error(`⚠️ Fullscreen exit detected (${allActivities.fullscreen_exits || 0} total). This is being recorded.`);
       } else if (data.suspicious_activity?.type === 'dev_tools') {
         toast.error(`🚫 Developer tools detected. This is a serious violation.`);
       } else if (data.suspicious_activity?.type === 'copy' || data.suspicious_activity?.type === 'paste') {

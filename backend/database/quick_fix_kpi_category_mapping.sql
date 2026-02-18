@@ -36,3 +36,5 @@ FROM kpis kp
 LEFT JOIN test_categories tc ON kp.test_category_id = tc.id
 ORDER BY kp.id;
 
+
+

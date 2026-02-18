@@ -27,3 +27,5 @@ UPDATE kras SET role_name = 'General' WHERE role_name IS NULL;
 -- ALTER TABLE kras MODIFY COLUMN role_name VARCHAR(255) NOT NULL;
 -- CREATE INDEX idx_role_name ON kras (role_name);
 
+
+

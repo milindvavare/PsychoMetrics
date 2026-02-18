@@ -158,3 +158,5 @@ CREATE TABLE IF NOT EXISTS kra_templates (
   INDEX idx_company (company_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+
+

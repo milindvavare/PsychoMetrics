@@ -163,7 +163,7 @@ CREATE TABLE IF NOT EXISTS test_attempts (
   tab_switch_count INT DEFAULT 0,
   fullscreen_exit_count INT DEFAULT 0,
   violation_score INT DEFAULT 0,
-  suspicion_risk_level ENUM('low', 'medium', 'high') DEFAULT 'low',
+  suspicion_risk_level ENUM('low', 'medium', 'high', 'critical') DEFAULT 'low',
   suspicious_activity JSON,
   metadata JSON,
   FOREIGN KEY (test_id) REFERENCES tests(id) ON DELETE CASCADE,
@@ -208,7 +208,9 @@ CREATE TABLE IF NOT EXISTS scores (
   weighted_score DECIMAL(10,2) NULL,
   violation_score INT DEFAULT 0,
   recommendation_status ENUM('strong_hire', 'consider', 'not_recommended', 'reject') NULL,
-  risk_level ENUM('low', 'medium', 'high') DEFAULT 'low',
+  risk_level ENUM('low', 'medium', 'high', 'critical') DEFAULT 'low',
+  confidence_index DECIMAL(5,2) NULL COMMENT 'Adjusted confidence score (test score - risk penalty)',
+  integrity_recommendation JSON NULL COMMENT 'Full integrity recommendation object with action, status, and details',
   role_fit JSON NULL,
   work_environment_fit JSON NULL,
   behavioral_risks JSON NULL,
@@ -220,7 +222,9 @@ CREATE TABLE IF NOT EXISTS scores (
   UNIQUE KEY unique_attempt_score (attempt_id),
   INDEX idx_test (test_id),
   INDEX idx_candidate (candidate_id),
-  INDEX idx_percentile (percentile)
+  INDEX idx_percentile (percentile),
+  INDEX idx_confidence_index (confidence_index),
+  INDEX idx_risk_level (risk_level)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- Benchmarks table

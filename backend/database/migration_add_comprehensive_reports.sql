@@ -95,3 +95,5 @@ CREATE TABLE IF NOT EXISTS comprehensive_reports (
   INDEX idx_report_type (report_type)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+
+

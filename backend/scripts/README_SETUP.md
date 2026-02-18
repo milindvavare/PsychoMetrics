@@ -162,3 +162,5 @@ If you get errors about company_id:
 - The script creates a test candidate if one doesn't exist
 - All KRAs are assigned to the test candidate automatically
 
+
+

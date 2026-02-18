@@ -100,3 +100,5 @@ if (!attemptId) {
 
 recalculateScores(parseInt(attemptId));
 
+
+
