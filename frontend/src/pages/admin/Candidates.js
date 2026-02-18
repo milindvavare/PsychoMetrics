@@ -23,7 +23,8 @@ import {
   Edit,
   Delete,
   Email,
-  Assignment
+  Assignment,
+  TrendingUp
 } from '@mui/icons-material';
 import {
   Select,
@@ -42,9 +43,11 @@ import {
   DialogActions as ConfirmDialogActions
 } from '@mui/material';
 import { toast } from 'react-toastify';
+import { useNavigate } from 'react-router-dom';
 import api from '../../utils/api';
 
 const Candidates = () => {
+  const navigate = useNavigate();
   const [candidates, setCandidates] = useState([]);
   const [tests, setTests] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -294,6 +297,14 @@ const Candidates = () => {
                     title="Assign Test"
                   >
                     <Assignment />
+                  </IconButton>
+                  <IconButton
+                    size="small"
+                    onClick={() => navigate(`/dashboard/kra-dashboard/candidate/${candidate.id}`)}
+                    color="info"
+                    title="View KRA/KPI Dashboard"
+                  >
+                    <TrendingUp />
                   </IconButton>
                   <IconButton 
                     size="small" 

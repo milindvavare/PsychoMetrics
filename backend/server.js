@@ -23,6 +23,9 @@ const candidateRoutes = require('./routes/candidates');
 const categoryRoutes = require('./routes/categories');
 const candidateAuthRoutes = require('./routes/candidateAuth');
 const testAssignmentRoutes = require('./routes/testAssignments');
+const kraRoutes = require('./routes/kras');
+const kpiRoutes = require('./routes/kpis');
+const userRoutes = require('./routes/users');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -34,12 +37,17 @@ app.use(cors({
   credentials: true
 }));
 
-// Rate limiting
-const limiter = rateLimit({
+// Rate limiting - General API routes (more lenient)
+const generalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100 // limit each IP to 100 requests per windowMs
+  max: 500, // limit each IP to 500 requests per windowMs (increased from 100)
+  message: {
+    success: false,
+    message: 'Too many requests from this IP, please try again later.'
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
 });
-app.use('/api/', limiter);
 
 // Body parser
 app.use(express.json({ limit: '10mb' }));
@@ -51,10 +59,13 @@ app.use((req, res, next) => {
   next();
 });
 
-// Health check
+// Health check (no rate limiting)
 app.get('/health', (req, res) => {
   res.json({ status: 'OK', timestamp: new Date().toISOString() });
 });
+
+// Apply general rate limiter to all API routes (login routes have their own limiter in route files)
+app.use('/api/', generalLimiter);
 
 // API Routes
 app.use('/api/auth', authRoutes);
@@ -72,6 +83,9 @@ app.use('/api/candidates', candidateRoutes);
 app.use('/api/categories', categoryRoutes);
 app.use('/api/candidate-auth', candidateAuthRoutes);
 app.use('/api/test-assignments', testAssignmentRoutes);
+app.use('/api/kras', kraRoutes);
+app.use('/api/kpis', kpiRoutes);
+app.use('/api/users', userRoutes);
 
 // Error handling middleware
 app.use((err, req, res, next) => {

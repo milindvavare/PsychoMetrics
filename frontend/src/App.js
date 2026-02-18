@@ -15,6 +15,10 @@ import Categories from './pages/admin/Categories';
 import Candidates from './pages/admin/Candidates';
 import Reports from './pages/admin/Reports';
 import TestResults from './pages/admin/TestResults';
+import HRDetailedReport from './pages/admin/HRDetailedReport';
+import KRAs from './pages/admin/KRAs';
+import KPIs from './pages/admin/KPIs';
+import KRADashboard from './pages/admin/KRADashboard';
 import Settings from './pages/admin/Settings';
 import TestPage from './pages/TestPage';
 import TestComplete from './pages/TestComplete';
@@ -71,6 +75,10 @@ function App() {
               <Route path="candidates" element={<Candidates />} />
               <Route path="reports" element={<Reports />} />
               <Route path="reports/test/:testId" element={<TestResults />} />
+              <Route path="reports/hr-detailed/:attemptId" element={<HRDetailedReport />} />
+              <Route path="kras" element={<KRAs />} />
+              <Route path="kpis" element={<KPIs />} />
+              <Route path="kra-dashboard/:employeeType/:employeeId" element={<KRADashboard />} />
               <Route path="settings" element={<Settings />} />
             </Route>
 

@@ -35,25 +35,15 @@ import {
 } from '@mui/icons-material';
 import { toast } from 'react-toastify';
 import api from '../../utils/api';
-import { Radar } from 'react-chartjs-2';
 import {
-  Chart as ChartJS,
-  RadialLinearScale,
-  PointElement,
-  LineElement,
-  Filler,
-  Tooltip,
-  Legend
-} from 'chart.js';
-
-ChartJS.register(
-  RadialLinearScale,
-  PointElement,
-  LineElement,
-  Filler,
-  Tooltip,
-  Legend
-);
+  RadarChart,
+  PolarGrid,
+  PolarAngleAxis,
+  PolarRadiusAxis,
+  Radar,
+  ResponsiveContainer,
+  Tooltip
+} from 'recharts';
 
 const TestResults = () => {
   const { testId } = useParams();
@@ -264,6 +254,70 @@ const TestResults = () => {
         />
       </Box>
 
+      {/* Overall Performance Spider Chart */}
+      {scores.length > 0 && (() => {
+        // Calculate average scores per category across all candidates
+        const categoryAverages = {};
+        let candidateCount = 0;
+
+        scores.forEach(score => {
+          if (score.category_scores && typeof score.category_scores === 'object') {
+            candidateCount++;
+            Object.values(score.category_scores).forEach(cat => {
+              if (!categoryAverages[cat.category_name]) {
+                categoryAverages[cat.category_name] = { total: 0, count: 0 };
+              }
+              categoryAverages[cat.category_name].total += parseFloat(cat.percentage || 0);
+              categoryAverages[cat.category_name].count++;
+            });
+          }
+        });
+
+        const radarData = Object.entries(categoryAverages).map(([name, data]) => ({
+          category: name,
+          average: candidateCount > 0 ? (data.total / candidateCount) : 0,
+          fullMark: 100
+        }));
+
+        if (radarData.length > 0) {
+          return (
+            <Paper sx={{ p: 3, mb: 3 }}>
+              <Typography variant="h5" gutterBottom>
+                Overall Performance - Category Averages
+              </Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                Average performance across all candidates by category
+              </Typography>
+              <ResponsiveContainer width="100%" height={400}>
+                <RadarChart data={radarData}>
+                  <PolarGrid />
+                  <PolarAngleAxis 
+                    dataKey="category" 
+                    tick={{ fontSize: 12 }}
+                  />
+                  <PolarRadiusAxis 
+                    angle={90} 
+                    domain={[0, 100]} 
+                    tick={{ fontSize: 10 }}
+                  />
+                  <Radar
+                    name="Average Performance"
+                    dataKey="average"
+                    stroke="#667eea"
+                    fill="#667eea"
+                    fillOpacity={0.6}
+                  />
+                  <Tooltip 
+                    formatter={(value) => [`${value.toFixed(2)}%`, 'Average Score']}
+                  />
+                </RadarChart>
+              </ResponsiveContainer>
+            </Paper>
+          );
+        }
+        return null;
+      })()}
+
       {/* Results Table */}
       <Paper>
         <TableContainer>
@@ -344,6 +398,14 @@ const TestResults = () => {
                         title="View Details"
                       >
                         <Visibility />
+                      </IconButton>
+                      <IconButton
+                        size="small"
+                        onClick={() => navigate(`/dashboard/reports/hr-detailed/${score.attempt_id}`)}
+                        color="info"
+                        title="View HR Detailed Report"
+                      >
+                        <Assessment />
                       </IconButton>
                       <IconButton
                         size="small"
@@ -435,6 +497,47 @@ const TestResults = () => {
                       </Grid>
                     ))}
                   </Grid>
+                </Box>
+              )}
+
+              {/* Spider Chart - Performance Visualization */}
+              {selectedCandidate.category_scores && Object.keys(selectedCandidate.category_scores).length > 0 && (
+                <Box sx={{ mt: 4 }}>
+                  <Typography variant="h6" gutterBottom>
+                    Performance Spider Chart
+                  </Typography>
+                  <Paper sx={{ p: 2, mt: 2 }}>
+                    <ResponsiveContainer width="100%" height={400}>
+                      <RadarChart
+                        data={Object.values(selectedCandidate.category_scores).map(cat => ({
+                          category: cat.category_name,
+                          score: parseFloat(cat.percentage || 0),
+                          fullMark: 100
+                        }))}
+                      >
+                        <PolarGrid />
+                        <PolarAngleAxis 
+                          dataKey="category" 
+                          tick={{ fontSize: 12 }}
+                        />
+                        <PolarRadiusAxis 
+                          angle={90} 
+                          domain={[0, 100]} 
+                          tick={{ fontSize: 10 }}
+                        />
+                        <Radar
+                          name="Performance"
+                          dataKey="score"
+                          stroke="#667eea"
+                          fill="#667eea"
+                          fillOpacity={0.6}
+                        />
+                        <Tooltip 
+                          formatter={(value) => [`${value.toFixed(2)}%`, 'Score']}
+                        />
+                      </RadarChart>
+                    </ResponsiveContainer>
+                  </Paper>
                 </Box>
               )}
             </Box>

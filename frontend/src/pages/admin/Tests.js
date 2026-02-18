@@ -28,7 +28,8 @@ import {
   Delete,
   Visibility,
   PlayArrow,
-  Assignment
+  Assignment,
+  ContentCopy
 } from '@mui/icons-material';
 import {
   Checkbox,
@@ -64,7 +65,15 @@ const Tests = () => {
     enable_ai_interpretation: true,
     enable_benchmark: true,
     enable_shortlist: true,
-    status: 'draft'
+    status: 'draft',
+    settings: {
+      random_question_order: false,
+      random_option_shuffle: false,
+      show_disclaimer: false,
+      disclaimer_text: '',
+      require_consent: false,
+      consent_text: ''
+    }
   });
 
   useEffect(() => {
@@ -111,6 +120,7 @@ const Tests = () => {
   const handleOpenDialog = (test = null) => {
     if (test) {
       setEditingTest(test);
+      const settings = typeof test.settings === 'string' ? JSON.parse(test.settings || '{}') : (test.settings || {});
       setFormData({
         title: test.title || '',
         description: test.description || '',
@@ -124,7 +134,15 @@ const Tests = () => {
         enable_ai_interpretation: test.enable_ai_interpretation !== false,
         enable_benchmark: test.enable_benchmark !== false,
         enable_shortlist: test.enable_shortlist !== false,
-        status: test.status || 'draft'
+        status: test.status || 'draft',
+        settings: {
+          random_question_order: settings.random_question_order || false,
+          random_option_shuffle: settings.random_option_shuffle || false,
+          show_disclaimer: settings.show_disclaimer || false,
+          disclaimer_text: settings.disclaimer_text || '',
+          require_consent: settings.require_consent || false,
+          consent_text: settings.consent_text || ''
+        }
       });
     } else {
       setEditingTest(null);
@@ -141,10 +159,37 @@ const Tests = () => {
         enable_ai_interpretation: true,
         enable_benchmark: true,
         enable_shortlist: true,
-        status: 'draft'
+        status: 'draft',
+        settings: {
+          random_question_order: false,
+          random_option_shuffle: false,
+          show_disclaimer: false,
+          disclaimer_text: '',
+          require_consent: false,
+          consent_text: ''
+        }
       });
     }
     setOpenDialog(true);
+  };
+
+  const handleClone = async (testId) => {
+    if (!window.confirm('Are you sure you want to clone this test?')) {
+      return;
+    }
+    try {
+      const response = await api.post(`/tests/${testId}/clone`, {
+        new_title: `${tests.find(t => t.id === testId)?.title} (Copy)`
+      });
+      if (response.success) {
+        toast.success('Test cloned successfully');
+        loadTests();
+      } else {
+        toast.error(response.message || 'Failed to clone test');
+      }
+    } catch (error) {
+      toast.error('Failed to clone test');
+    }
   };
 
   const handleCloseDialog = () => {
@@ -154,8 +199,13 @@ const Tests = () => {
 
   const handleSubmit = async () => {
     try {
+      const payload = {
+        ...formData,
+        settings: formData.settings // Ensure settings are included
+      };
+      
       if (editingTest) {
-        const response = await api.put(`/tests/${editingTest.id}`, formData);
+        const response = await api.put(`/tests/${editingTest.id}`, payload);
         if (response.success) {
           toast.success('Test updated successfully');
           handleCloseDialog();
@@ -164,7 +214,7 @@ const Tests = () => {
           toast.error(response.message || 'Failed to update test');
         }
       } else {
-        const response = await api.post('/tests', formData);
+        const response = await api.post('/tests', payload);
         if (response.success) {
           toast.success('Test created successfully');
           handleCloseDialog();
@@ -323,6 +373,14 @@ const Tests = () => {
                   </IconButton>
                   <IconButton 
                     size="small" 
+                    onClick={() => handleClone(test.id)} 
+                    color="primary"
+                    title="Clone Test"
+                  >
+                    <ContentCopy />
+                  </IconButton>
+                  <IconButton 
+                    size="small" 
                     onClick={() => handleAssignQuestionsClick(test)} 
                     color="secondary"
                     title="Assign Questions"
@@ -450,6 +508,84 @@ const Tests = () => {
               }
               label="Enable Shortlist Recommendation"
             />
+            <Typography variant="h6" sx={{ mt: 2, mb: 1 }}>Test Settings</Typography>
+            <FormControlLabel
+              control={
+                <Switch
+                  checked={formData.settings.random_question_order}
+                  onChange={(e) => setFormData({ 
+                    ...formData, 
+                    settings: { ...formData.settings, random_question_order: e.target.checked }
+                  })}
+                />
+              }
+              label="Random Question Order"
+            />
+            <FormControlLabel
+              control={
+                <Switch
+                  checked={formData.settings.random_option_shuffle}
+                  onChange={(e) => setFormData({ 
+                    ...formData, 
+                    settings: { ...formData.settings, random_option_shuffle: e.target.checked }
+                  })}
+                />
+              }
+              label="Random Option Shuffle"
+            />
+            <Typography variant="h6" sx={{ mt: 2, mb: 1 }}>Disclaimer & Consent</Typography>
+            <FormControlLabel
+              control={
+                <Switch
+                  checked={formData.settings.show_disclaimer}
+                  onChange={(e) => setFormData({ 
+                    ...formData, 
+                    settings: { ...formData.settings, show_disclaimer: e.target.checked }
+                  })}
+                />
+              }
+              label="Show Disclaimer Before Test"
+            />
+            {formData.settings.show_disclaimer && (
+              <TextField
+                label="Disclaimer Text"
+                fullWidth
+                multiline
+                rows={3}
+                value={formData.settings.disclaimer_text}
+                onChange={(e) => setFormData({ 
+                  ...formData, 
+                  settings: { ...formData.settings, disclaimer_text: e.target.value }
+                })}
+                placeholder="Enter disclaimer text that candidates must read before starting the test..."
+              />
+            )}
+            <FormControlLabel
+              control={
+                <Switch
+                  checked={formData.settings.require_consent}
+                  onChange={(e) => setFormData({ 
+                    ...formData, 
+                    settings: { ...formData.settings, require_consent: e.target.checked }
+                  })}
+                />
+              }
+              label="Require Consent Checkbox"
+            />
+            {formData.settings.require_consent && (
+              <TextField
+                label="Consent Text"
+                fullWidth
+                multiline
+                rows={2}
+                value={formData.settings.consent_text}
+                onChange={(e) => setFormData({ 
+                  ...formData, 
+                  settings: { ...formData.settings, consent_text: e.target.value }
+                })}
+                placeholder="Enter consent text that candidates must agree to..."
+              />
+            )}
           </Box>
         </DialogContent>
         <DialogActions>

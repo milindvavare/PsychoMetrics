@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const reportController = require('../controllers/reportController');
+const comprehensiveReportController = require('../controllers/comprehensiveReportController');
 const { authenticate } = require('../middleware/auth');
 const { authenticateCandidate } = require('../middleware/candidateAuth');
 
@@ -42,6 +43,11 @@ const authenticateReportAccess = async (req, res, next) => {
 };
 
 router.get('/attempt/:attempt_id/pdf', authenticateReportAccess, reportController.generatePDFReport);
+
+// Comprehensive Reports
+router.get('/hr-detailed/:attempt_id', authenticate, comprehensiveReportController.getHRDetailedReport);
+router.get('/candidate-summary/:attempt_id', authenticateReportAccess, comprehensiveReportController.getCandidateSummaryReport);
+router.get('/comparative/:test_id', authenticate, comprehensiveReportController.getComparativeReport);
 
 module.exports = router;
 

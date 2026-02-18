@@ -2,6 +2,8 @@ const db = require('../config/database');
 const logger = require('../utils/logger');
 const { checkAttemptLimit, logIPAddress } = require('../middleware/antiCheat');
 const scoring = require('../utils/scoring');
+const comprehensiveReportController = require('./comprehensiveReportController');
+const kraKpiCalculator = require('../utils/kraKpiCalculator');
 
 // Start test attempt
 const startAttempt = async (req, res) => {
@@ -292,8 +294,8 @@ const submitAttempt = async (req, res) => {
     const companyId = req.companyId || req.user?.company_id || req.candidate?.company_id;
     const candidateId = req.candidate?.id;
 
-    // Get attempt with access control
-    let query = 'SELECT ta.* FROM test_attempts ta JOIN tests t ON ta.test_id = t.id WHERE ta.id = ?';
+    // Get attempt with access control (include company_id from test)
+    let query = 'SELECT ta.*, t.company_id FROM test_attempts ta JOIN tests t ON ta.test_id = t.id WHERE ta.id = ?';
     let params = [attempt_id];
     
     if (candidateId) {
@@ -327,12 +329,54 @@ const submitAttempt = async (req, res) => {
     const submittedAt = new Date();
     const timeTaken = Math.floor((submittedAt - startedAt) / 1000);
 
-    // Update attempt status
+    // Get updated attempt data with all fields
+    const [updatedAttempts] = await db.pool.execute(
+      'SELECT * FROM test_attempts WHERE id = ?',
+      [attempt_id]
+    );
+    const updatedAttempt = updatedAttempts[0] || attempt;
+
+    // Calculate violation score
+    let violationScore = 0;
+    let riskLevel = 'low';
+    
+    // Handle both old (tab_switches) and new (tab_switch_count) column names
+    const tabSwitches = updatedAttempt.tab_switch_count || updatedAttempt.tab_switches || 0;
+    const fullscreenExits = updatedAttempt.fullscreen_exit_count || 0;
+    
+    violationScore += tabSwitches * 2;
+    violationScore += fullscreenExits * 3;
+
+    // Check suspicious activity
+    const suspiciousActivity = updatedAttempt.suspicious_activity 
+      ? (typeof updatedAttempt.suspicious_activity === 'string' 
+          ? JSON.parse(updatedAttempt.suspicious_activity) 
+          : updatedAttempt.suspicious_activity)
+      : null;
+
+    if (suspiciousActivity) {
+      if (suspiciousActivity.copy) violationScore += 5;
+      if (suspiciousActivity.paste) violationScore += 5;
+      if (suspiciousActivity.right_click) violationScore += 3;
+      if (suspiciousActivity.dev_tools) violationScore += 10;
+    }
+
+    // Determine risk level
+    if (violationScore >= 20) riskLevel = 'high';
+    else if (violationScore >= 10) riskLevel = 'medium';
+
+    // Update attempt status with violation data
     await db.query(
       `UPDATE test_attempts 
-       SET status = 'completed', submitted_at = NOW(), time_taken_seconds = ?
+       SET status = 'completed', 
+           submitted_at = NOW(), 
+           time_taken_seconds = ?,
+           violation_score = ?,
+           tab_switch_count = ?,
+           fullscreen_exit_count = ?,
+           suspicion_risk_level = ?
        WHERE id = ?`,
-      [timeTaken, attempt_id]
+      [timeTaken, violationScore, tabSwitches, fullscreenExits, riskLevel, attempt_id]
     );
 
     // Calculate all scores
@@ -342,14 +386,76 @@ const submitAttempt = async (req, res) => {
       attempt.candidate_id
     );
 
-    logger.info(`Test attempt submitted: ${attempt_id}`);
+    // Update scores table with violation score
+    await db.query(
+      `UPDATE scores 
+       SET violation_score = ?, risk_level = ?
+       WHERE attempt_id = ?`,
+      [violationScore, riskLevel, attempt_id]
+    );
+
+    // Generate comprehensive report data (HR Detailed Report)
+    try {
+      await comprehensiveReportController.generateComprehensiveReportData(
+        attempt_id,
+        'hr_detailed'
+      );
+      logger.info(`Comprehensive report generated for attempt: ${attempt_id}`);
+    } catch (reportError) {
+      // Log error but don't fail the submission
+      logger.error(`Error generating comprehensive report for attempt ${attempt_id}:`, reportError);
+    }
+
+    // Generate candidate summary report
+    try {
+      await comprehensiveReportController.generateComprehensiveReportData(
+        attempt_id,
+        'candidate_summary'
+      );
+      logger.info(`Candidate summary report generated for attempt: ${attempt_id}`);
+    } catch (reportError) {
+      logger.error(`Error generating candidate summary for attempt ${attempt_id}:`, reportError);
+    }
+
+    // Automatically calculate and store KRA/KPI performance from test results
+    try {
+      const testCompanyId = attempt.company_id || companyId || req.user?.company_id;
+      if (testCompanyId) {
+        logger.info(`Starting KRA/KPI calculation for attempt ${attempt_id}, candidate ${attempt.candidate_id}, company ${testCompanyId}`);
+        await kraKpiCalculator.calculateAndStoreKRAKPIPerformance(
+          attempt_id,
+          attempt.test_id,
+          attempt.candidate_id,
+          testCompanyId
+        );
+        logger.info(`KRA/KPI performance calculation completed for attempt: ${attempt_id}`);
+      } else {
+        logger.warn(`Company ID not found for attempt ${attempt_id}, skipping KRA/KPI calculation`);
+      }
+    } catch (kraKpiError) {
+      // Log error but don't fail the submission
+      logger.error(`Error calculating KRA/KPI performance for attempt ${attempt_id}:`, kraKpiError);
+      logger.error(`Error stack:`, kraKpiError.stack);
+      console.error('KRA/KPI Calculation Error:', {
+        attemptId: attempt_id,
+        testId: attempt.test_id,
+        candidateId: attempt.candidate_id,
+        companyId: testCompanyId,
+        error: kraKpiError.message,
+        stack: kraKpiError.stack
+      });
+    }
+
+    logger.info(`Test attempt submitted: ${attempt_id} with violation score: ${violationScore}`);
 
     res.json({
       success: true,
       message: 'Test attempt submitted successfully',
       data: {
         attempt_id,
-        score: scoreData
+        score: scoreData,
+        violation_score: violationScore,
+        risk_level: riskLevel
       }
     });
   } catch (error) {

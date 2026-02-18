@@ -29,7 +29,9 @@ import {
   Settings,
   Logout,
   Notifications,
-  AccountCircle
+  AccountCircle,
+  TrendingUp,
+  ShowChart
 } from '@mui/icons-material';
 import { useAuth } from '../contexts/AuthContext';
 import { toast } from 'react-toastify';
@@ -42,6 +44,8 @@ const menuItems = [
   { text: 'Question Bank', icon: <QuestionAnswer />, path: '/dashboard/questions' },
   { text: 'Categories', icon: <BarChart />, path: '/dashboard/categories' },
   { text: 'Candidates', icon: <People />, path: '/dashboard/candidates' },
+  { text: 'KRA Management', icon: <TrendingUp />, path: '/dashboard/kras' },
+  { text: 'KPI Management', icon: <ShowChart />, path: '/dashboard/kpis' },
   { text: 'Reports & Analytics', icon: <Assessment />, path: '/dashboard/reports' },
   { text: 'Settings', icon: <Settings />, path: '/dashboard/settings' }
 ];

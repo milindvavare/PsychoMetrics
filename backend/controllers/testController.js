@@ -336,11 +336,112 @@ const deleteTest = async (req, res) => {
   }
 };
 
+// Clone test
+const cloneTest = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const companyId = req.companyId || req.user.company_id;
+    const { new_title } = req.body;
+
+    // Get original test
+    const [tests] = await db.pool.execute(
+      'SELECT * FROM tests WHERE id = ? AND company_id = ?',
+      [id, companyId]
+    );
+
+    if (tests.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Test not found'
+      });
+    }
+
+    const originalTest = tests[0];
+
+    // Start transaction
+    const result = await db.transaction(async (connection) => {
+      // Clone test with new title
+      const clonedTitle = new_title || `${originalTest.title} (Copy)`;
+      const [testResult] = await connection.execute(
+        `INSERT INTO tests 
+         (company_id, title, description, instructions, duration_minutes, passing_score,
+          max_attempts, negative_marking, negative_mark_percentage, enable_percentile,
+          enable_ai_interpretation, enable_benchmark, enable_shortlist, status, settings, created_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          companyId,
+          clonedTitle,
+          originalTest.description,
+          originalTest.instructions,
+          originalTest.duration_minutes,
+          originalTest.passing_score,
+          originalTest.max_attempts,
+          originalTest.negative_marking,
+          originalTest.negative_mark_percentage,
+          originalTest.enable_percentile,
+          originalTest.enable_ai_interpretation,
+          originalTest.enable_benchmark,
+          originalTest.enable_shortlist,
+          'draft', // Cloned tests start as draft
+          originalTest.settings,
+          req.user.id
+        ]
+      );
+
+      const newTestId = testResult.insertId;
+
+      // Clone category mappings
+      const [categories] = await connection.execute(
+        'SELECT category_id, weight FROM test_categories_mapping WHERE test_id = ?',
+        [id]
+      );
+
+      for (const category of categories) {
+        await connection.execute(
+          'INSERT INTO test_categories_mapping (test_id, category_id, weight) VALUES (?, ?, ?)',
+          [newTestId, category.category_id, category.weight]
+        );
+      }
+
+      // Clone test questions
+      const [questions] = await connection.execute(
+        'SELECT question_id, display_order FROM test_questions WHERE test_id = ?',
+        [id]
+      );
+
+      for (const question of questions) {
+        await connection.execute(
+          'INSERT INTO test_questions (test_id, question_id, display_order) VALUES (?, ?, ?)',
+          [newTestId, question.question_id, question.display_order]
+        );
+      }
+
+      return newTestId;
+    });
+
+    logger.info(`Test cloned: ${id} -> ${result} by user ${req.user.id}`);
+
+    res.status(201).json({
+      success: true,
+      message: 'Test cloned successfully',
+      data: { test_id: result }
+    });
+  } catch (error) {
+    logger.error('Clone test error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error cloning test',
+      error: error.message
+    });
+  }
+};
+
 module.exports = {
   getTests,
   getTest,
   createTest,
   updateTest,
-  deleteTest
+  deleteTest,
+  cloneTest
 };
 

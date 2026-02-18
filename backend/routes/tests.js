@@ -40,5 +40,8 @@ router.put('/:id', authenticate, authorize('admin', 'super_admin', 'hr'), testCo
 // Delete test (admin only) - authenticate first, then authorize
 router.delete('/:id', authenticate, authorize('admin', 'super_admin'), testController.deleteTest);
 
+// Clone test (admin only)
+router.post('/:id/clone', authenticate, authorize('admin', 'super_admin', 'hr'), testController.cloneTest);
+
 module.exports = router;
 
