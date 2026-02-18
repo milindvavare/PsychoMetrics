@@ -261,23 +261,41 @@ const Questions = () => {
         correctAnswer = parseFloat(correctAnswer) || 0;
       }
 
+      // Prepare data for submission
       const data = {
         ...formData,
         options: filteredOptions,
-        correct_answer: correctAnswer
+        correct_answer: correctAnswer,
+        // Convert empty category_id to null
+        category_id: formData.category_id === '' ? null : formData.category_id,
+        // Ensure points and negative_points are numbers
+        points: parseFloat(formData.points) || 1.0,
+        negative_points: parseFloat(formData.negative_points) || 0.0,
+        // Convert empty explanation to null
+        explanation: formData.explanation === '' ? null : formData.explanation
       };
 
       if (editingQuestion) {
-        await api.put(`/questions/${editingQuestion.id}`, data);
-        toast.success('Question updated successfully');
+        const response = await api.put(`/questions/${editingQuestion.id}`, data);
+        if (response.success) {
+          toast.success('Question updated successfully');
+        } else {
+          throw new Error(response.message || 'Failed to update question');
+        }
       } else {
-        await api.post('/questions', data);
-        toast.success('Question created successfully');
+        const response = await api.post('/questions', data);
+        if (response.success) {
+          toast.success('Question created successfully');
+        } else {
+          throw new Error(response.message || 'Failed to create question');
+        }
       }
       handleCloseDialog();
       loadData();
     } catch (error) {
-      toast.error(error.message || 'Failed to save question');
+      console.error('Question save error:', error);
+      const errorMessage = error.response?.data?.message || error.message || 'Failed to save question';
+      toast.error(errorMessage);
     }
   };
 

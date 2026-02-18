@@ -27,5 +27,10 @@ router.post('/assign', authorize('admin', 'super_admin', 'hr'), kraController.as
 // Get employee KRAs
 router.get('/employee/:employee_type/:employee_id', kraController.getEmployeeKRAs);
 
+// Debug: Recalculate KRA/KPI for an attempt
+const kraKpiController = require('../controllers/kraKpiController');
+router.post('/recalculate/:attempt_id', authorize('admin', 'super_admin', 'hr'), kraKpiController.recalculateKRAKPI);
+router.get('/calculation-status/:attempt_id', authorize('admin', 'super_admin', 'hr'), kraKpiController.getCalculationStatus);
+
 module.exports = router;
 

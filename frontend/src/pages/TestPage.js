@@ -102,29 +102,46 @@ const TestPage = () => {
         setAttemptId(attemptResponse.data.attempt_id);
         
         // Set timer if duration is specified
-        if (testResponse.data.duration_minutes && !attemptResponse.data.is_resumed) {
-          // Only start timer for new attempts
+        if (testResponse.data.duration_minutes) {
           const durationSeconds = testResponse.data.duration_minutes * 60;
-          // Use setTimeout to ensure state is updated before starting timer
-          setTimeout(() => {
-            setTimeRemaining(durationSeconds);
-            startTimer(durationSeconds);
-          }, 50);
-        } else if (attemptResponse.data.is_resumed && testResponse.data.duration_minutes) {
-          // For resumed attempts, start with full duration
-          // TODO: Calculate actual remaining time based on attempt start time
-          const durationSeconds = testResponse.data.duration_minutes * 60;
-          setTimeout(() => {
-            setTimeRemaining(durationSeconds);
-            startTimer(durationSeconds);
-          }, 50);
+          let remainingSeconds = durationSeconds;
+          
+          // Calculate remaining time based on when attempt started
+          if (attemptResponse.data.started_at) {
+            const startedAt = new Date(attemptResponse.data.started_at);
+            const now = new Date();
+            const elapsedSeconds = Math.floor((now - startedAt) / 1000);
+            remainingSeconds = Math.max(0, durationSeconds - elapsedSeconds);
+            
+            console.log(`Timer calculation: Duration=${durationSeconds}s, Elapsed=${elapsedSeconds}s, Remaining=${remainingSeconds}s`);
+          }
+          
+          // Only start timer if there's time remaining
+          if (remainingSeconds > 0) {
+            setTimeout(() => {
+              setTimeRemaining(remainingSeconds);
+              startTimer(remainingSeconds);
+            }, 50);
+          } else {
+            // Time is up, auto-submit
+            toast.warning('Time has expired. Submitting test...');
+            setTimeout(() => {
+              handleTimeUp();
+            }, 1000);
+          }
         }
 
-        // Initialize tab detection
+        // Initialize enhanced anti-cheating detection
         tabDetectionRef.current = new TabDetection(handleTabSwitch);
         
+        // Request fullscreen mode
+        requestFullscreen();
+        
+        // Prevent page refresh
+        preventPageRefresh();
+        
         if (!warningShown) {
-          toast.warning('Please do not switch tabs during the test. Tab switches are being monitored.');
+          toast.warning('⚠️ Anti-cheating is active. Tab switches, copy/paste, and dev tools are monitored.');
           setWarningShown(true);
         }
       } else {
@@ -197,23 +214,111 @@ const TestPage = () => {
     }
   };
 
+  // Request fullscreen mode
+  const requestFullscreen = () => {
+    try {
+      const elem = document.documentElement;
+      if (elem.requestFullscreen) {
+        elem.requestFullscreen().catch(err => {
+          console.log('Fullscreen request denied:', err);
+        });
+      } else if (elem.webkitRequestFullscreen) {
+        elem.webkitRequestFullscreen();
+      } else if (elem.mozRequestFullScreen) {
+        elem.mozRequestFullScreen();
+      } else if (elem.msRequestFullscreen) {
+        elem.msRequestFullscreen();
+      }
+    } catch (error) {
+      console.log('Fullscreen not supported:', error);
+    }
+  };
+
+  // Prevent page refresh
+  const preventPageRefresh = () => {
+    const handleBeforeUnload = (e) => {
+      e.preventDefault();
+      e.returnValue = 'Are you sure you want to leave? Your progress may be lost.';
+      return e.returnValue;
+    };
+    
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    
+    // Also prevent back button
+    window.history.pushState(null, '', window.location.href);
+    window.addEventListener('popstate', () => {
+      window.history.pushState(null, '', window.location.href);
+      toast.warning('⚠️ Navigation blocked during test.');
+    });
+  };
+
+  // Track fullscreen exit
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      if (!document.fullscreenElement && !document.webkitFullscreenElement && 
+          !document.mozFullScreenElement && !document.msFullscreenElement) {
+        if (attemptId) {
+          // Track fullscreen exit
+          api.post('/attempts/track-tab', {
+            attempt_id: attemptId,
+            fullscreen_exit: true,
+            suspicious_activity: {
+              type: 'fullscreen_exit',
+              timestamp: new Date().toISOString()
+            }
+          }).catch(err => console.error('Fullscreen exit tracking error:', err));
+          
+          toast.error('⚠️ Fullscreen mode exited. Please return to fullscreen.');
+          
+          // Try to re-enter fullscreen after a delay
+          setTimeout(() => {
+            requestFullscreen();
+          }, 2000);
+        }
+      }
+    };
+
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
+    document.addEventListener('mozfullscreenchange', handleFullscreenChange);
+    document.addEventListener('MSFullscreenChange', handleFullscreenChange);
+
+    return () => {
+      document.removeEventListener('fullscreenchange', handleFullscreenChange);
+      document.removeEventListener('webkitfullscreenchange', handleFullscreenChange);
+      document.removeEventListener('mozfullscreenchange', handleFullscreenChange);
+      document.removeEventListener('MSFullscreenChange', handleFullscreenChange);
+    };
+  }, [attemptId]);
+
   const handleTabSwitch = async (data) => {
     if (!attemptId) return;
     
     try {
+      // Get all suspicious activities from TabDetection
+      const allActivities = tabDetectionRef.current?.getSuspiciousActivities() || {};
+      
       // API interceptor will automatically add candidate token
       await api.post('/attempts/track-tab', {
         attempt_id: attemptId,
         tab_switch: true,
-        suspicious_activity: data.suspicious_activity || {}
+        suspicious_activity: {
+          ...data.suspicious_activity,
+          ...allActivities,
+          timestamp: new Date().toISOString()
+        }
       });
       
       if (data.suspicious_activity?.type === 'tab_switch') {
-        toast.warning(`Warning: Tab switch detected. This is being recorded.`);
+        toast.warning(`⚠️ Tab switch detected (${allActivities.tab_switches || 0} total). This is being recorded.`);
       } else if (data.suspicious_activity?.type === 'dev_tools') {
-        toast.error(`Warning: Developer tools detected. This is a serious violation.`);
+        toast.error(`🚫 Developer tools detected. This is a serious violation.`);
       } else if (data.suspicious_activity?.type === 'copy' || data.suspicious_activity?.type === 'paste') {
-        toast.warning(`Warning: Copy/Paste attempt detected.`);
+        toast.warning(`⚠️ Copy/Paste attempt detected (${allActivities.copy_paste || 0} total).`);
+      } else if (data.suspicious_activity?.type === 'right_click') {
+        toast.warning(`⚠️ Right-click detected (${allActivities.right_clicks || 0} total).`);
+      } else if (data.suspicious_activity?.type === 'screenshot_attempt') {
+        toast.error(`🚫 Screenshot attempt detected. This is being recorded.`);
       }
     } catch (error) {
       console.error('Tab switch tracking error:', error);

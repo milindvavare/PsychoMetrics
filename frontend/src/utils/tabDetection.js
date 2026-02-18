@@ -31,6 +31,33 @@ class TabDetection {
       this.isTabActive = true;
     });
 
+    // Detect if user tries to leave fullscreen
+    document.addEventListener('fullscreenchange', () => {
+      if (!document.fullscreenElement) {
+        this.handleSuspiciousActivity('fullscreen_exit', {
+          timestamp: new Date().toISOString()
+        });
+      }
+    });
+
+    // Detect dev tools opening (using console detection)
+    let devToolsOpen = false;
+    const checkDevTools = () => {
+      const widthThreshold = window.outerWidth - window.innerWidth > 160;
+      const heightThreshold = window.outerHeight - window.innerHeight > 160;
+      
+      if (widthThreshold || heightThreshold) {
+        if (!devToolsOpen) {
+          devToolsOpen = true;
+          this.handleDevTools();
+        }
+      } else {
+        devToolsOpen = false;
+      }
+    };
+    
+    setInterval(checkDevTools, 1000);
+
     // Copy/Paste detection
     document.addEventListener('copy', (e) => {
       this.handleCopyPaste('copy');
@@ -66,26 +93,54 @@ class TabDetection {
       if (e.key === 'F12') {
         this.handleDevTools();
         e.preventDefault();
+        return false;
       }
       // Ctrl+Shift+I - Dev Tools
-      if (e.ctrlKey && e.shiftKey && e.key === 'I') {
+      if (e.ctrlKey && e.shiftKey && (e.key === 'I' || e.key === 'i')) {
         this.handleDevTools();
         e.preventDefault();
+        return false;
       }
       // Ctrl+Shift+J - Console
-      if (e.ctrlKey && e.shiftKey && e.key === 'J') {
+      if (e.ctrlKey && e.shiftKey && (e.key === 'J' || e.key === 'j')) {
         this.handleDevTools();
         e.preventDefault();
+        return false;
+      }
+      // Ctrl+Shift+C - Inspect Element
+      if (e.ctrlKey && e.shiftKey && (e.key === 'C' || e.key === 'c')) {
+        this.handleDevTools();
+        e.preventDefault();
+        return false;
       }
       // Ctrl+U - View Source
-      if (e.ctrlKey && e.key === 'u') {
+      if (e.ctrlKey && (e.key === 'u' || e.key === 'U')) {
         this.handleSuspiciousActivity('view_source_attempt');
         e.preventDefault();
+        return false;
       }
       // Print Screen
-      if (e.key === 'PrintScreen') {
+      if (e.key === 'PrintScreen' || e.keyCode === 44) {
         this.handleSuspiciousActivity('screenshot_attempt');
         e.preventDefault();
+        return false;
+      }
+      // Ctrl+P - Print (could be used to screenshot)
+      if (e.ctrlKey && (e.key === 'p' || e.key === 'P')) {
+        this.handleSuspiciousActivity('print_attempt');
+        e.preventDefault();
+        return false;
+      }
+      // Ctrl+S - Save page
+      if (e.ctrlKey && (e.key === 's' || e.key === 'S')) {
+        this.handleSuspiciousActivity('save_page_attempt');
+        e.preventDefault();
+        return false;
+      }
+      // Ctrl+A - Select All (prevent)
+      if (e.ctrlKey && (e.key === 'a' || e.key === 'A')) {
+        e.preventDefault();
+        return false;
       }
     });
 

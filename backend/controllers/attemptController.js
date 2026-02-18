@@ -100,6 +100,7 @@ const startAttempt = async (req, res) => {
         message: 'Resuming existing test attempt',
         data: {
           attempt_id: existingAttempt.id,
+          started_at: existingAttempt.started_at,
           test: {
             id: test.id,
             title: test.title,
@@ -148,17 +149,25 @@ const startAttempt = async (req, res) => {
 
     logger.info(`Test attempt started: ${result.insertId} for test ${test_id}`);
 
+    // Get the created attempt to return started_at
+    const [newAttempt] = await db.pool.execute(
+      'SELECT started_at FROM test_attempts WHERE id = ?',
+      [result.insertId]
+    );
+
     res.status(201).json({
       success: true,
       message: 'Test attempt started',
       data: {
         attempt_id: result.insertId,
+        started_at: newAttempt[0]?.started_at || new Date().toISOString(),
         test: {
           id: test.id,
           title: test.title,
           duration_minutes: test.duration_minutes,
           instructions: test.instructions
-        }
+        },
+        is_resumed: false
       }
     });
   } catch (error) {
@@ -380,19 +389,38 @@ const submitAttempt = async (req, res) => {
     );
 
     // Calculate all scores
+    logger.info(`Calculating scores for attempt ${attempt_id}...`);
     const scoreData = await scoring.calculateAllScores(
       attempt_id,
       attempt.test_id,
       attempt.candidate_id
     );
+    logger.info(`Scores calculated. Category scores: ${Object.keys(scoreData.category_scores || {}).length} categories`);
 
     // Update scores table with violation score
-    await db.query(
+    await db.pool.execute(
       `UPDATE scores 
        SET violation_score = ?, risk_level = ?
        WHERE attempt_id = ?`,
       [violationScore, riskLevel, attempt_id]
     );
+    logger.info(`Scores table updated with violation data`);
+    
+    // IMPORTANT: Wait a moment to ensure scores are fully committed to database
+    // Then verify scores exist before proceeding with KRA/KPI calculation
+    await new Promise(resolve => setTimeout(resolve, 100));
+    
+    // Verify scores are saved
+    const [verifyScores] = await db.pool.execute(
+      'SELECT category_scores FROM scores WHERE attempt_id = ?',
+      [attempt_id]
+    );
+    
+    if (verifyScores.length === 0) {
+      logger.error(`❌ Scores not found after calculation for attempt ${attempt_id}`);
+    } else {
+      logger.info(`✓ Verified scores are saved to database`);
+    }
 
     // Generate comprehensive report data (HR Detailed Report)
     try {
@@ -418,29 +446,61 @@ const submitAttempt = async (req, res) => {
     }
 
     // Automatically calculate and store KRA/KPI performance from test results
+    // IMPORTANT: This must run AFTER scores are calculated and saved
     try {
       const testCompanyId = attempt.company_id || companyId || req.user?.company_id;
-      if (testCompanyId) {
-        logger.info(`Starting KRA/KPI calculation for attempt ${attempt_id}, candidate ${attempt.candidate_id}, company ${testCompanyId}`);
-        await kraKpiCalculator.calculateAndStoreKRAKPIPerformance(
-          attempt_id,
-          attempt.test_id,
-          attempt.candidate_id,
-          testCompanyId
-        );
-        logger.info(`KRA/KPI performance calculation completed for attempt: ${attempt_id}`);
+      if (!testCompanyId) {
+        logger.warn(`⚠️  Company ID not found for attempt ${attempt_id}, skipping KRA/KPI calculation`);
+        logger.warn(`   attempt.company_id: ${attempt.company_id}`);
+        logger.warn(`   companyId: ${companyId}`);
+        logger.warn(`   req.user?.company_id: ${req.user?.company_id}`);
       } else {
-        logger.warn(`Company ID not found for attempt ${attempt_id}, skipping KRA/KPI calculation`);
+        // Double-check scores are saved before calculating KRA/KPI
+        const [verifyScores] = await db.pool.execute(
+          'SELECT category_scores FROM scores WHERE attempt_id = ?',
+          [attempt_id]
+        );
+        
+        if (verifyScores.length === 0) {
+          logger.error(`❌ Scores not found for attempt ${attempt_id}, cannot calculate KRA/KPI`);
+        } else if (!verifyScores[0].category_scores) {
+          logger.error(`❌ Category scores are null for attempt ${attempt_id}, cannot calculate KRA/KPI`);
+        } else {
+          logger.info(`\n🔄 Triggering KRA/KPI calculation...`);
+          logger.info(`   Attempt: ${attempt_id}`);
+          logger.info(`   Test: ${attempt.test_id}`);
+          logger.info(`   Candidate: ${attempt.candidate_id}`);
+          logger.info(`   Company: ${testCompanyId}`);
+          
+          const result = await kraKpiCalculator.calculateAndStoreKRAKPIPerformance(
+            attempt_id,
+            attempt.test_id,
+            attempt.candidate_id,
+            testCompanyId
+          );
+          
+          if (result && result.success) {
+            logger.info(`✅ KRA/KPI calculation completed successfully`);
+            logger.info(`   Summary: ${JSON.stringify(result.summary)}`);
+          } else {
+            logger.warn(`⚠️  KRA/KPI calculation completed with warnings: ${result?.message || 'Unknown error'}`);
+            if (result?.details) {
+              logger.warn(`   Details: ${result.details}`);
+            }
+          }
+        }
       }
     } catch (kraKpiError) {
       // Log error but don't fail the submission
-      logger.error(`Error calculating KRA/KPI performance for attempt ${attempt_id}:`, kraKpiError);
-      logger.error(`Error stack:`, kraKpiError.stack);
-      console.error('KRA/KPI Calculation Error:', {
+      logger.error(`\n❌❌❌ ERROR in KRA/KPI calculation ❌❌❌`);
+      logger.error(`Attempt ID: ${attempt_id}`);
+      logger.error(`Error:`, kraKpiError);
+      logger.error(`Stack:`, kraKpiError.stack);
+      console.error('KRA/KPI Calculation Error Details:', {
         attemptId: attempt_id,
         testId: attempt.test_id,
         candidateId: attempt.candidate_id,
-        companyId: testCompanyId,
+        companyId: attempt.company_id || companyId || req.user?.company_id,
         error: kraKpiError.message,
         stack: kraKpiError.stack
       });

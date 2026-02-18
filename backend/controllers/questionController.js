@@ -188,12 +188,54 @@ const updateQuestion = async (req, res) => {
 
     for (const field of allowedFields) {
       if (updateData[field] !== undefined) {
-        if (['options', 'correct_answer', 'metadata'].includes(field) && typeof updateData[field] === 'object') {
+        if (['options', 'correct_answer', 'metadata'].includes(field)) {
+          // Handle JSON fields
+          if (typeof updateData[field] === 'object' && updateData[field] !== null) {
+            updates.push(`${field} = ?`);
+            values.push(JSON.stringify(updateData[field]));
+          } else if (updateData[field] === null || updateData[field] === '') {
+            // Allow null/empty for optional JSON fields (except options and correct_answer which are required)
+            if (field === 'metadata') {
+              updates.push(`${field} = ?`);
+              values.push(null);
+            } else {
+              // For options and correct_answer, don't allow null/empty
+              logger.warn(`Skipping ${field} update: cannot be null or empty`);
+            }
+          } else if (typeof updateData[field] === 'string') {
+            // If it's a string, check if it's already valid JSON
+            updates.push(`${field} = ?`);
+            try {
+              // Try to parse to validate it's JSON
+              JSON.parse(updateData[field]);
+              // If valid JSON string, use it directly
+              values.push(updateData[field]);
+            } catch (e) {
+              // If not valid JSON, stringify it
+              values.push(JSON.stringify(updateData[field]));
+            }
+          } else {
+            // For other types, stringify
+            updates.push(`${field} = ?`);
+            values.push(JSON.stringify(updateData[field]));
+          }
+        } else if (field === 'category_id') {
+          // Handle category_id - convert empty string to null
           updates.push(`${field} = ?`);
-          values.push(JSON.stringify(updateData[field]));
+          values.push(updateData[field] === '' || updateData[field] === null ? null : parseInt(updateData[field]));
+        } else if (field === 'points' || field === 'negative_points') {
+          // Handle numeric fields
+          updates.push(`${field} = ?`);
+          values.push(parseFloat(updateData[field]) || 0);
         } else {
+          // Handle other fields (question_text, question_type, difficulty, explanation)
           updates.push(`${field} = ?`);
-          values.push(updateData[field]);
+          // Convert empty strings to null for optional fields
+          if ((field === 'explanation') && updateData[field] === '') {
+            values.push(null);
+          } else {
+            values.push(updateData[field]);
+          }
         }
       }
     }
@@ -207,12 +249,12 @@ const updateQuestion = async (req, res) => {
 
     values.push(id, companyId);
 
-    await db.query(
+    await db.pool.execute(
       `UPDATE questions SET ${updates.join(', ')} WHERE id = ? AND company_id = ?`,
       values
     );
 
-    logger.info(`Question updated: ${id} by user ${req.user.id}`);
+    logger.info(`Question updated: ${id} by user ${req.user?.id || 'unknown'}`);
 
     res.json({
       success: true,

@@ -134,7 +134,7 @@ const calculateCategoryScores = async (attemptId, testId) => {
     };
 
     // Get category mappings for this test
-    const categories = await db.query(
+    let categories = await db.query(
       `SELECT tcm.*, tc.name, tc.reverse_score, tc.weight
        FROM test_categories_mapping tcm
        JOIN test_categories tc ON tcm.category_id = tc.id
@@ -142,12 +142,55 @@ const calculateCategoryScores = async (attemptId, testId) => {
       [testId]
     );
 
+    // If no categories mapped via test_categories_mapping, get categories from questions directly
+    if (categories.length === 0) {
+      logger.info(`No test_categories_mapping found for test ${testId}, using question categories directly`);
+      
+      // Get unique category IDs from questions in this test
+      const [testQuestions] = await db.pool.execute(
+        `SELECT DISTINCT q.category_id
+         FROM test_questions tq
+         JOIN questions q ON tq.question_id = q.id
+         WHERE tq.test_id = ? AND q.category_id IS NOT NULL`,
+        [testId]
+      );
+
+      if (testQuestions.length > 0) {
+        const categoryIds = testQuestions.map(tq => tq.category_id);
+        
+        // Get category details
+        const [categoryDetails] = await db.pool.execute(
+          `SELECT id, name, reverse_score, weight
+           FROM test_categories
+           WHERE id IN (${categoryIds.map(() => '?').join(',')})`,
+          categoryIds
+        );
+
+        // Convert to same format as test_categories_mapping
+        categories = categoryDetails.map(cat => ({
+          category_id: cat.id,
+          name: cat.name,
+          reverse_score: cat.reverse_score || false,
+          weight: cat.weight || 1.0
+        }));
+
+        logger.info(`Found ${categories.length} categories from questions: ${categories.map(c => c.name).join(', ')}`);
+      } else {
+        logger.warn(`No categories found in questions for test ${testId}. Category scores will be empty.`);
+      }
+    }
+
     // Calculate scores per category
     const categoryScores = {};
 
     for (const category of categories) {
       const categoryId = category.category_id;
       const categoryAnswers = answers.filter(a => a.category_id === categoryId);
+      
+      if (categoryAnswers.length === 0) {
+        logger.debug(`No answers found for category ${category.name} (ID: ${categoryId})`);
+        continue;
+      }
       
       let totalScore = 0;
       let maxScore = 0;
@@ -180,9 +223,15 @@ const calculateCategoryScores = async (attemptId, testId) => {
           : 0,
         correct_count: correctCount,
         total_count: totalCount,
-        reverse_score: category.reverse_score,
+        reverse_score: category.reverse_score || false,
         weight: parseFloat(category.weight) || 1.0
       };
+    }
+
+    if (Object.keys(categoryScores).length === 0) {
+      logger.warn(`No category scores calculated for attempt ${attemptId}. Check if questions have category_id assigned.`);
+    } else {
+      logger.info(`Calculated scores for ${Object.keys(categoryScores).length} categories`);
     }
 
     return categoryScores;
@@ -283,11 +332,29 @@ const calculatePercentile = async (testId, percentageScore) => {
  */
 const calculateAllScores = async (attemptId, testId, candidateId) => {
   try {
+    logger.info(`[calculateAllScores] Starting score calculation for attempt ${attemptId}, test ${testId}, candidate ${candidateId}`);
+    
     // Calculate category scores
+    logger.info(`[calculateAllScores] Calculating category scores...`);
     const categoryScores = await calculateCategoryScores(attemptId, testId);
+    logger.info(`[calculateAllScores] Category scores calculated: ${Object.keys(categoryScores).length} categories`);
+    
+    if (Object.keys(categoryScores).length === 0) {
+      logger.warn(`[calculateAllScores] ⚠️  WARNING: No category scores calculated for attempt ${attemptId}`);
+      logger.warn(`[calculateAllScores] This may be because:`);
+      logger.warn(`[calculateAllScores]   1. Test has no categories mapped in test_categories_mapping`);
+      logger.warn(`[calculateAllScores]   2. Questions don't have category_id assigned`);
+      logger.warn(`[calculateAllScores]   3. No answers found for the categories`);
+    } else {
+      Object.values(categoryScores).forEach(cat => {
+        logger.info(`[calculateAllScores]   - ${cat.category_name}: ${cat.percentage}%`);
+      });
+    }
 
     // Calculate total score
+    logger.info(`[calculateAllScores] Calculating total score...`);
     const totalScoreData = await calculateTotalScore(attemptId, testId);
+    logger.info(`[calculateAllScores] Total score: ${totalScoreData.total_score}/${totalScoreData.max_score} (${totalScoreData.percentage_score}%)`);
 
     // Calculate percentile if enabled
     let percentile = null;
@@ -310,6 +377,10 @@ const calculateAllScores = async (attemptId, testId, candidateId) => {
     const passed = totalScoreData.percentage_score >= passingScore;
 
     // Save or update score
+    const categoryScoresJson = JSON.stringify(categoryScores);
+    logger.info(`[calculateAllScores] Category scores JSON length: ${categoryScoresJson.length} characters`);
+    logger.info(`[calculateAllScores] Category scores JSON preview: ${categoryScoresJson.substring(0, 200)}`);
+    
     const scoreData = {
       attempt_id: attemptId,
       test_id: testId,
@@ -318,7 +389,7 @@ const calculateAllScores = async (attemptId, testId, candidateId) => {
       max_score: totalScoreData.max_score,
       percentage_score: totalScoreData.percentage_score,
       percentile: percentile,
-      category_scores: JSON.stringify(categoryScores),
+      category_scores: categoryScoresJson,
       passed: passed
     };
 
@@ -329,7 +400,8 @@ const calculateAllScores = async (attemptId, testId, candidateId) => {
     );
 
     if (existingScores.length > 0) {
-      await db.query(
+      logger.info(`[calculateAllScores] Updating existing score record (ID: ${existingScores[0].id})`);
+      await db.pool.execute(
         `UPDATE scores SET 
          total_score = ?, max_score = ?, percentage_score = ?, percentile = ?, 
          category_scores = ?, passed = ? 
@@ -344,8 +416,10 @@ const calculateAllScores = async (attemptId, testId, candidateId) => {
           attemptId
         ]
       );
+      logger.info(`[calculateAllScores] ✅ Score record updated successfully`);
     } else {
-      await db.query(
+      logger.info(`[calculateAllScores] Creating new score record`);
+      await db.pool.execute(
         `INSERT INTO scores 
          (attempt_id, test_id, candidate_id, total_score, max_score, percentage_score, percentile, category_scores, passed)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -361,6 +435,20 @@ const calculateAllScores = async (attemptId, testId, candidateId) => {
           scoreData.passed
         ]
       );
+      logger.info(`[calculateAllScores] ✅ Score record created successfully`);
+    }
+    
+    // Verify the save
+    const [verifyScores] = await db.pool.execute(
+      'SELECT category_scores FROM scores WHERE attempt_id = ?',
+      [attemptId]
+    );
+    
+    if (verifyScores.length > 0) {
+      const savedCategoryScores = typeof verifyScores[0].category_scores === 'string'
+        ? JSON.parse(verifyScores[0].category_scores)
+        : verifyScores[0].category_scores;
+      logger.info(`[calculateAllScores] ✅ Verified: ${Object.keys(savedCategoryScores || {}).length} categories saved to database`);
     }
 
     return {

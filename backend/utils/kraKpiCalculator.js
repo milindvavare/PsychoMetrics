@@ -7,54 +7,115 @@ const logger = require('../utils/logger');
  */
 const calculateAndStoreKRAKPIPerformance = async (attemptId, testId, candidateId, companyId) => {
   try {
-    logger.info(`Starting KRA/KPI calculation for attempt ${attemptId}, test ${testId}, candidate ${candidateId}, company ${companyId}`);
+    logger.info(`═══════════════════════════════════════════════════════════`);
+    logger.info(`🚀 Starting KRA/KPI calculation`);
+    logger.info(`   Attempt ID: ${attemptId}`);
+    logger.info(`   Test ID: ${testId}`);
+    logger.info(`   Candidate ID: ${candidateId}`);
+    logger.info(`   Company ID: ${companyId}`);
+    logger.info(`═══════════════════════════════════════════════════════════`);
     
-    // Get test attempt details
+    // Step 1: Get test attempt details
     const [attempts] = await db.pool.execute(
       'SELECT * FROM test_attempts WHERE id = ?',
       [attemptId]
     );
 
     if (attempts.length === 0) {
-      logger.warn(`Attempt ${attemptId} not found for KRA/KPI calculation`);
-      return;
+      logger.error(`❌ Attempt ${attemptId} not found`);
+      return { success: false, message: 'Attempt not found' };
     }
 
     const attempt = attempts[0];
     const submittedAt = attempt.submitted_at || new Date();
+    logger.info(`✓ Attempt found. Status: ${attempt.status}, Submitted: ${submittedAt}`);
 
-    // Get test category scores from the scores table
-    const [scores] = await db.pool.execute(
-      'SELECT category_scores, percentage_score FROM scores WHERE attempt_id = ?',
-      [attemptId]
-    );
-
-    if (scores.length === 0) {
-      logger.warn(`No scores found for attempt ${attemptId}. Scores may not be calculated yet.`);
-      return;
+    // Step 2: Get test category scores from the scores table
+    // Retry logic in case scores are still being saved
+    let scores = [];
+    let retries = 3;
+    let scoreData = null;
+    
+    while (retries > 0 && scores.length === 0) {
+      [scores] = await db.pool.execute(
+        'SELECT category_scores, percentage_score FROM scores WHERE attempt_id = ?',
+        [attemptId]
+      );
+      
+      if (scores.length === 0) {
+        logger.warn(`⚠️  Scores not found, retrying... (${retries} retries left)`);
+        retries--;
+        await new Promise(resolve => setTimeout(resolve, 500)); // Wait 500ms before retry
+      } else {
+        scoreData = scores[0];
+        break;
+      }
     }
 
-    const scoreData = scores[0];
+    if (!scoreData || scores.length === 0) {
+      logger.error(`❌ No scores found for attempt ${attemptId} after ${3 - retries} retries.`);
+      logger.error(`   Make sure test is submitted and scores are calculated.`);
+      logger.error(`   Check if scores table has a record for attempt_id = ${attemptId}`);
+      return { success: false, message: 'No scores found. Test may not be fully submitted or scores not calculated yet.' };
+    }
+
+    logger.info(`✓ Scores found for attempt ${attemptId}`);
+    
     let categoryScores = {};
     
     try {
-      categoryScores = typeof scoreData.category_scores === 'string' 
-        ? JSON.parse(scoreData.category_scores) 
-        : scoreData.category_scores || {};
-      
-      if (!categoryScores || Object.keys(categoryScores).length === 0) {
-        logger.warn(`No category scores found in attempt ${attemptId}`);
-        return;
+      // Handle different formats of category_scores
+      if (typeof scoreData.category_scores === 'string') {
+        if (scoreData.category_scores.trim() === '') {
+          logger.error(`❌ category_scores is empty string`);
+          return { success: false, message: 'Category scores are empty' };
+        }
+        categoryScores = JSON.parse(scoreData.category_scores);
+      } else if (scoreData.category_scores && typeof scoreData.category_scores === 'object') {
+        categoryScores = scoreData.category_scores;
+      } else {
+        logger.error(`❌ category_scores is null or invalid type: ${typeof scoreData.category_scores}`);
+        return { success: false, message: 'Category scores are null or invalid' };
       }
       
-      logger.info(`Found ${Object.keys(categoryScores).length} category scores for attempt ${attemptId}`);
+      // Handle case where categoryScores might be an array instead of object
+      if (Array.isArray(categoryScores)) {
+        logger.info(`   Converting array format to object format`);
+        const tempObj = {};
+        categoryScores.forEach((cat, index) => {
+          tempObj[cat.category_id || index] = cat;
+        });
+        categoryScores = tempObj;
+      }
+      
+      if (!categoryScores || Object.keys(categoryScores).length === 0) {
+        logger.error(`❌ No category scores found in attempt ${attemptId}`);
+        logger.error(`   category_scores type: ${typeof scoreData.category_scores}`);
+        logger.error(`   category_scores value: ${JSON.stringify(scoreData.category_scores).substring(0, 200)}`);
+        return { success: false, message: 'No category scores found in test results' };
+      }
+      
+      logger.info(`✓ Found ${Object.keys(categoryScores).length} category scores:`);
+      Object.entries(categoryScores).forEach(([key, value]) => {
+        const catName = value?.category_name || value?.name || key;
+        const percentage = value?.percentage || value?.score || 0;
+        logger.info(`   - ${catName}: ${percentage}%`);
+      });
     } catch (parseError) {
-      logger.error(`Error parsing category_scores for attempt ${attemptId}:`, parseError);
-      return;
+      logger.error(`❌ Error parsing category_scores for attempt ${attemptId}:`, parseError);
+      logger.error(`   Raw data type: ${typeof scoreData.category_scores}`);
+      logger.error(`   Raw data (first 500 chars): ${String(scoreData.category_scores).substring(0, 500)}`);
+      return { success: false, message: 'Error parsing category scores', error: parseError.message };
     }
 
-    // Get candidate's assigned KRAs
-    // First, try to get KRAs assigned directly to the candidate
+    // Step 3: Get all test categories for the company (for mapping)
+    const [allTestCategories] = await db.pool.execute(
+      `SELECT id, name FROM test_categories WHERE company_id = ?`,
+      [companyId]
+    );
+    logger.info(`✓ Found ${allTestCategories.length} test categories in company`);
+
+    // Step 4: Get candidate's assigned KRAs
     let [assignedKRAs] = await db.pool.execute(
       `SELECT ek.*, k.title as kra_title, k.role_name, k.evaluation_period, k.weight as kra_weight
        FROM employee_kras ek
@@ -66,12 +127,13 @@ const calculateAndStoreKRAKPIPerformance = async (attemptId, testId, candidateId
       [candidateId, companyId]
     );
 
-    // If no KRAs assigned directly, try to get KRAs based on candidate's role or test
+    logger.info(`✓ Found ${assignedKRAs.length} directly assigned KRAs for candidate ${candidateId}`);
+
+    // If no KRAs assigned directly, try to get KRAs based on candidate's role
     if (assignedKRAs.length === 0) {
-      logger.info(`No KRAs directly assigned to candidate ${candidateId}, checking for role-based KRAs`);
+      logger.info(`⚠️  No KRAs directly assigned, checking for role-based KRAs...`);
       
       // Try to get candidate's role from test assignment or candidate profile
-      // First check if there's a test assignment with role info
       const [testInfo] = await db.pool.execute(
         `SELECT t.role_name, ta.role 
          FROM test_attempts ta
@@ -86,7 +148,6 @@ const calculateAndStoreKRAKPIPerformance = async (attemptId, testId, candidateId
       } else if (testInfo.length > 0 && testInfo[0].role) {
         roleName = testInfo[0].role;
       } else {
-        // Try to get from candidate profile (if role column exists)
         try {
           const [candidateInfo] = await db.pool.execute(
             'SELECT role, position FROM candidates WHERE id = ?',
@@ -97,13 +158,11 @@ const calculateAndStoreKRAKPIPerformance = async (attemptId, testId, candidateId
             roleName = candidateInfo[0].role || candidateInfo[0].position;
           }
         } catch (error) {
-          // Role column might not exist, that's okay
-          logger.debug('Role column not found in candidates table, skipping role-based KRA lookup');
+          logger.debug('Role column not found in candidates table');
         }
       }
       
       if (roleName) {
-        // Get KRAs for the candidate's role
         [assignedKRAs] = await db.pool.execute(
           `SELECT k.id as kra_id, k.title as kra_title, k.role_name, k.evaluation_period, k.weight as kra_weight,
                   k.company_id, k.status, 'candidate' as employee_type, ? as employee_id
@@ -114,212 +173,223 @@ const calculateAndStoreKRAKPIPerformance = async (attemptId, testId, candidateId
           [candidateId, roleName, companyId]
         );
         
-        logger.info(`Found ${assignedKRAs.length} role-based KRAs for candidate ${candidateId} with role "${roleName}"`);
+        logger.info(`✓ Found ${assignedKRAs.length} role-based KRAs for role "${roleName}"`);
       } else {
-        logger.debug(`No role found for candidate ${candidateId}, cannot lookup role-based KRAs`);
+        logger.warn(`⚠️  No role found for candidate ${candidateId}`);
       }
     }
 
     if (assignedKRAs.length === 0) {
-      logger.info(`No KRAs found for candidate ${candidateId} (neither assigned nor role-based), skipping KRA/KPI calculation`);
-      logger.info(`To enable KRA/KPI calculation, please assign KRAs to the candidate or ensure the candidate has a role that matches KRA role_name`);
-      return;
+      const errorMsg = `❌ No KRAs found for candidate ${candidateId}. Please assign KRAs to the candidate or ensure candidate has a role that matches KRA role_name.`;
+      logger.error(errorMsg);
+      return { 
+        success: false, 
+        message: 'No KRAs assigned to candidate. Please assign KRAs in the system.',
+        details: 'To enable KRA/KPI calculation: 1) Assign KRAs to candidate via employee_kras table, OR 2) Set candidate role to match KRA role_name'
+      };
     }
     
-    logger.info(`Found ${assignedKRAs.length} KRAs for candidate ${candidateId}`);
+    logger.info(`✓ Processing ${assignedKRAs.length} KRAs for candidate ${candidateId}`);
 
-    // Get all test categories for the company (for mapping)
-    const [allTestCategories] = await db.pool.execute(
-      `SELECT id, name FROM test_categories WHERE company_id = ?`,
-      [companyId]
-    );
-    
-    // Get test categories for this specific test (if mapping table exists)
-    let testCategories = [];
-    try {
-      const [categories] = await db.pool.execute(
-        `SELECT tc.id, tc.name, tcm.weight
-         FROM test_categories_mapping tcm
-         JOIN test_categories tc ON tcm.category_id = tc.id
-         WHERE tcm.test_id = ?`,
-        [testId]
-      );
-      testCategories = categories;
-    } catch (error) {
-      // Table might not exist, use all categories
-      logger.debug('test_categories_mapping table not found, using all categories');
-      testCategories = allTestCategories;
-    }
-
-    // Create a mapping: test category name -> category score
+    // Step 5: Create category score map
+    // categoryScores is an object where keys are category_id and values are category objects
     const categoryScoreMap = {};
     Object.values(categoryScores).forEach(cat => {
-      if (cat.category_name) {
-        categoryScoreMap[cat.category_name.toLowerCase().trim()] = cat;
-      }
-    });
-
-    // Process each assigned KRA
-    for (const assignedKRA of assignedKRAs) {
-      const kraId = assignedKRA.kra_id;
-      const evaluationPeriod = assignedKRA.evaluation_period || 'quarterly';
-      
-      // Calculate period dates based on evaluation period
-      const periodDates = calculatePeriodDates(submittedAt, evaluationPeriod);
-      
-      // Get KPIs for this KRA (including test_category_id)
-      const [kpis] = await db.pool.execute(
-        `SELECT kp.*, tc.name as test_category_name
-         FROM kpis kp
-         LEFT JOIN test_categories tc ON kp.test_category_id = tc.id
-         WHERE kp.kra_id = ? AND kp.company_id = ? AND kp.status = 'active'`,
-        [kraId, companyId]
-      );
-
-      if (kpis.length === 0) {
-        logger.info(`No KPIs found for KRA ${kraId}, skipping`);
-        continue;
-      }
-
-      // Calculate KRA performance based on test category scores
-      // Try to match test categories to KRA (by name similarity or mapping)
-      let kraScore = 0;
-      let totalKPIWeight = 0;
-      let completedKPIs = 0;
-
-      // Process each KPI
-      for (const kpi of kpis) {
-        try {
-          let matchingCategory = null;
-          
-          // First, check if KPI has explicit test_category_id mapping
-          if (kpi.test_category_id) {
-            const categoryId = kpi.test_category_id;
-            
-            // Find the test category by ID
-            const testCat = allTestCategories.find(tc => tc.id === categoryId);
-            
-            if (testCat) {
-              // Match by category name (case-insensitive)
-              const catNameLower = testCat.name.toLowerCase().trim();
-              matchingCategory = categoryScoreMap[catNameLower];
-              
-              if (matchingCategory) {
-                logger.info(`Using explicit mapping: KPI "${kpi.title}" -> Category "${testCat.name}" (ID: ${categoryId})`);
-              } else {
-                logger.warn(`Explicit mapping found for KPI "${kpi.title}" to category "${testCat.name}" (ID: ${categoryId}), but category score not found in test results`);
-              }
-            } else {
-              logger.warn(`KPI "${kpi.title}" has test_category_id ${categoryId}, but category not found`);
-            }
-          }
-          
-          // If no explicit mapping, fall back to fuzzy matching
-          if (!matchingCategory) {
-            logger.info(`No explicit mapping for KPI ${kpi.id} (${kpi.title}), trying fuzzy name matching...`);
-            logger.info(`Available categories in test: ${Object.keys(categoryScoreMap).join(', ')}`);
-            matchingCategory = findMatchingCategory(kpi, testCategories, categoryScoreMap);
-            
-            if (matchingCategory) {
-              logger.info(`Fuzzy match found: KPI "${kpi.title}" -> Category "${matchingCategory.category_name}"`);
-            } else {
-              logger.warn(`No match found for KPI "${kpi.title}". Please map it to a test category in KPI settings.`);
-            }
-          }
-          
-          if (matchingCategory && matchingCategory.percentage !== undefined) {
-            const percentage = parseFloat(matchingCategory.percentage) || 0;
-            
-            // Calculate KPI performance
-            const targetValue = parseFloat(kpi.target_value) || 100;
-            const actualValue = percentage; // Use test category percentage as actual value
-            const achievementPercentage = targetValue > 0 
-              ? Math.min(100, (actualValue / targetValue) * 100) 
-              : 0;
-
-            // Determine rating
-            const rating = calculateRating(achievementPercentage);
-
-            logger.info(`Calculating KPI ${kpi.id} (${kpi.title}): actual=${actualValue}%, target=${targetValue}%, achievement=${achievementPercentage.toFixed(2)}%`);
-
-            // Store or update KPI performance
-            await storeKPIPerformance({
-              companyId,
-              employeeType: 'candidate',
-              employeeId: candidateId,
-              kpiId: kpi.id,
-              kraId: kraId,
-              periodStart: periodDates.start,
-              periodEnd: periodDates.end,
-              targetValue: targetValue,
-              actualValue: actualValue,
-              achievementPercentage: achievementPercentage,
-              rating: rating,
-              status: 'approved', // Auto-approve test-based performance
-              comments: `Auto-calculated from test completion. Test: ${testId}, Attempt: ${attemptId}, Category: ${matchingCategory.category_name || 'N/A'}`,
-              submittedBy: null // System-generated
-            });
-
-            // Accumulate for KRA score
-            const kpiWeight = parseFloat(kpi.weight) || 1.0;
-            kraScore += (achievementPercentage / 100) * kpiWeight;
-            totalKPIWeight += kpiWeight;
-            completedKPIs++;
-            
-            logger.info(`KPI ${kpi.id} performance stored successfully`);
-          } else {
-            if (kpi.test_category_id) {
-              logger.warn(`KPI ${kpi.id} (${kpi.title}) has test_category_id ${kpi.test_category_id} but no matching category score found. Available categories: ${Object.keys(categoryScoreMap).join(', ')}`);
-            } else {
-              logger.warn(`KPI ${kpi.id} (${kpi.title}) has no test_category_id mapping and fuzzy matching failed. Available categories: ${Object.keys(categoryScoreMap).join(', ')}. Please map this KPI to a test category in KPI settings.`);
-            }
-          }
-        } catch (kpiError) {
-          logger.error(`Error processing KPI ${kpi.id} (${kpi.title}):`, kpiError);
-          // Continue with next KPI instead of failing entire process
+      if (cat && cat.category_name) {
+        const catNameLower = cat.category_name.toLowerCase().trim();
+        categoryScoreMap[catNameLower] = cat;
+        // Also map by category_id for flexibility
+        if (cat.category_id) {
+          categoryScoreMap[`id_${cat.category_id}`] = cat;
         }
       }
+    });
+    logger.info(`✓ Created category score map with ${Object.keys(categoryScoreMap).length} entries`);
+    logger.info(`   Mapped categories: ${Object.values(categoryScores).map(c => c?.category_name || 'N/A').join(', ')}`);
 
-      // Calculate overall KRA score
-      const overallKRAScore = totalKPIWeight > 0 
-        ? (kraScore / totalKPIWeight) * 100 
-        : 0;
+    // Step 6: Process each assigned KRA
+    let totalKPIsProcessed = 0;
+    let totalKPIsMatched = 0;
+    let totalKRAsProcessed = 0;
 
-      const kraRating = calculateRating(overallKRAScore);
-
-      logger.info(`KRA ${kraId} (${assignedKRA.kra_title}) summary: ${completedKPIs}/${kpis.length} KPIs completed, overall score: ${overallKRAScore.toFixed(2)}%`);
-
-      // Store or update KRA performance summary (even if no KPIs matched, to track the attempt)
+    for (const assignedKRA of assignedKRAs) {
       try {
-        await storeKRAPerformanceSummary({
-          companyId,
-          employeeType: 'candidate',
-          employeeId: candidateId,
-          kraId: kraId,
-          periodStart: periodDates.start,
-          periodEnd: periodDates.end,
-          totalKPIs: kpis.length,
-          completedKPIs: completedKPIs,
-          overallScore: overallKRAScore,
-          weightedScore: overallKRAScore * (parseFloat(assignedKRA.kra_weight) || 1.0) / 100,
-          rating: kraRating,
-          status: 'approved',
-          reviewComments: `Auto-calculated from test completion. Test: ${testId}, Attempt: ${attemptId}. ${completedKPIs} of ${kpis.length} KPIs matched with test categories.`,
-          submittedBy: null
-        });
+        const kraId = assignedKRA.kra_id;
+        const evaluationPeriod = assignedKRA.evaluation_period || 'quarterly';
+        
+        logger.info(`\n📊 Processing KRA: ${assignedKRA.kra_title} (ID: ${kraId})`);
+        
+        // Calculate period dates
+        const periodDates = calculatePeriodDates(submittedAt, evaluationPeriod);
+        logger.info(`   Period: ${periodDates.start} to ${periodDates.end}`);
+        
+        // Get KPIs for this KRA (including test_category_id)
+        const [kpis] = await db.pool.execute(
+          `SELECT kp.*, tc.name as test_category_name
+           FROM kpis kp
+           LEFT JOIN test_categories tc ON kp.test_category_id = tc.id
+           WHERE kp.kra_id = ? AND kp.company_id = ? AND kp.status = 'active'`,
+          [kraId, companyId]
+        );
 
-        logger.info(`KRA ${kraId} performance summary stored successfully`);
+        if (kpis.length === 0) {
+          logger.warn(`   ⚠️  No KPIs found for KRA ${kraId} (${assignedKRA.kra_title})`);
+          continue;
+        }
+
+        logger.info(`   ✓ Found ${kpis.length} KPIs for this KRA`);
+
+        // Calculate KRA performance
+        let kraScore = 0;
+        let totalKPIWeight = 0;
+        let completedKPIs = 0;
+
+        // Process each KPI
+        for (const kpi of kpis) {
+          totalKPIsProcessed++;
+          try {
+            let matchingCategory = null;
+            
+            logger.info(`   🔍 Processing KPI: ${kpi.title} (ID: ${kpi.id})`);
+            
+            // First, check if KPI has explicit test_category_id mapping
+            if (kpi.test_category_id) {
+              const categoryId = kpi.test_category_id;
+              const testCat = allTestCategories.find(tc => tc.id === categoryId);
+              
+              if (testCat) {
+                const catNameLower = testCat.name.toLowerCase().trim();
+                matchingCategory = categoryScoreMap[catNameLower];
+                
+                if (matchingCategory) {
+                  logger.info(`      ✓ Using explicit mapping: "${testCat.name}" (ID: ${categoryId})`);
+                } else {
+                  logger.warn(`      ⚠️  Explicit mapping to "${testCat.name}" but category score not found in test results`);
+                }
+              } else {
+                logger.warn(`      ⚠️  KPI has test_category_id ${categoryId} but category not found`);
+              }
+            }
+            
+            // If no explicit mapping, fall back to fuzzy matching
+            if (!matchingCategory) {
+              logger.info(`      🔎 No explicit mapping, trying fuzzy name matching...`);
+              matchingCategory = findMatchingCategory(kpi, allTestCategories, categoryScoreMap);
+              
+              if (matchingCategory) {
+                logger.info(`      ✓ Fuzzy match found: "${matchingCategory.category_name}"`);
+              }
+            }
+            
+            if (matchingCategory && matchingCategory.percentage !== undefined) {
+              totalKPIsMatched++;
+              const percentage = parseFloat(matchingCategory.percentage) || 0;
+              
+              // Calculate KPI performance
+              const targetValue = parseFloat(kpi.target_value) || 100;
+              const actualValue = percentage;
+              const achievementPercentage = targetValue > 0 
+                ? Math.min(100, (actualValue / targetValue) * 100) 
+                : 0;
+
+              const rating = calculateRating(achievementPercentage);
+
+              logger.info(`      ✓ Calculated: actual=${actualValue}%, target=${targetValue}%, achievement=${achievementPercentage.toFixed(2)}%, rating=${rating}`);
+
+              // Store KPI performance
+              await storeKPIPerformance({
+                companyId,
+                employeeType: 'candidate',
+                employeeId: candidateId,
+                kpiId: kpi.id,
+                kraId: kraId,
+                periodStart: periodDates.start,
+                periodEnd: periodDates.end,
+                targetValue: targetValue,
+                actualValue: actualValue,
+                achievementPercentage: achievementPercentage,
+                rating: rating,
+                status: 'approved',
+                comments: `Auto-calculated from test completion. Test: ${testId}, Attempt: ${attemptId}, Category: ${matchingCategory.category_name || 'N/A'}`,
+                submittedBy: null
+              });
+
+              logger.info(`      ✅ KPI performance stored successfully`);
+
+              // Accumulate for KRA score
+              const kpiWeight = parseFloat(kpi.weight) || 1.0;
+              kraScore += (achievementPercentage / 100) * kpiWeight;
+              totalKPIWeight += kpiWeight;
+              completedKPIs++;
+            } else {
+              logger.warn(`      ❌ No match found for KPI "${kpi.title}"`);
+              logger.warn(`         Available categories: ${Object.keys(categoryScoreMap).join(', ')}`);
+            }
+          } catch (kpiError) {
+            logger.error(`      ❌ Error processing KPI ${kpi.id} (${kpi.title}):`, kpiError);
+          }
+        }
+
+        // Calculate overall KRA score
+        const overallKRAScore = totalKPIWeight > 0 
+          ? (kraScore / totalKPIWeight) * 100 
+          : 0;
+
+        const kraRating = calculateRating(overallKRAScore);
+
+        logger.info(`   📈 KRA Summary: ${completedKPIs}/${kpis.length} KPIs matched, overall score: ${overallKRAScore.toFixed(2)}%, rating: ${kraRating}`);
+
+        // Store KRA performance summary
+        try {
+          await storeKRAPerformanceSummary({
+            companyId,
+            employeeType: 'candidate',
+            employeeId: candidateId,
+            kraId: kraId,
+            periodStart: periodDates.start,
+            periodEnd: periodDates.end,
+            totalKPIs: kpis.length,
+            completedKPIs: completedKPIs,
+            overallScore: overallKRAScore,
+            weightedScore: overallKRAScore * (parseFloat(assignedKRA.kra_weight) || 1.0) / 100,
+            rating: kraRating,
+            status: 'approved',
+            reviewComments: `Auto-calculated from test completion. Test: ${testId}, Attempt: ${attemptId}. ${completedKPIs} of ${kpis.length} KPIs matched with test categories.`,
+            submittedBy: null
+          });
+
+          logger.info(`   ✅ KRA performance summary stored successfully`);
+          totalKRAsProcessed++;
+        } catch (kraError) {
+          logger.error(`   ❌ Error storing KRA ${kraId} performance summary:`, kraError);
+        }
       } catch (kraError) {
-        logger.error(`Error storing KRA ${kraId} performance summary:`, kraError);
-        // Continue with next KRA instead of failing entire process
+        logger.error(`❌ Error processing KRA ${assignedKRA.kra_id}:`, kraError);
       }
     }
 
-    logger.info(`KRA/KPI performance calculation completed successfully for attempt ${attemptId}`);
+    // Final summary
+    logger.info(`\n═══════════════════════════════════════════════════════════`);
+    logger.info(`✅ KRA/KPI Calculation Complete!`);
+    logger.info(`   KRAs Processed: ${totalKRAsProcessed}`);
+    logger.info(`   KPIs Processed: ${totalKPIsProcessed}`);
+    logger.info(`   KPIs Matched: ${totalKPIsMatched}`);
+    logger.info(`═══════════════════════════════════════════════════════════\n`);
+
+    return {
+      success: true,
+      message: 'KRA/KPI calculation completed',
+      summary: {
+        krasProcessed: totalKRAsProcessed,
+        kpisProcessed: totalKPIsProcessed,
+        kpisMatched: totalKPIsMatched
+      }
+    };
   } catch (error) {
-    logger.error(`Error calculating KRA/KPI performance for attempt ${attemptId}:`, error);
-    logger.error(`Error stack:`, error.stack);
-    // Don't throw - this is a background process, but log the error for debugging
+    logger.error(`\n❌❌❌ CRITICAL ERROR in KRA/KPI calculation ❌❌❌`);
+    logger.error(`Attempt ID: ${attemptId}`);
+    logger.error(`Error:`, error);
+    logger.error(`Stack:`, error.stack);
     console.error('KRA/KPI Calculation Error Details:', {
       attemptId,
       testId,
@@ -328,6 +398,11 @@ const calculateAndStoreKRAKPIPerformance = async (attemptId, testId, candidateId
       error: error.message,
       stack: error.stack
     });
+    return {
+      success: false,
+      message: 'Error calculating KRA/KPI performance',
+      error: error.message
+    };
   }
 };
 
@@ -358,7 +433,6 @@ const calculatePeriodDates = (date, period) => {
       end = new Date(d.getFullYear(), 11, 31);
       break;
     default:
-      // Default to current month
       start = new Date(d.getFullYear(), d.getMonth(), 1);
       end = new Date(d.getFullYear(), d.getMonth() + 1, 0);
   }
@@ -375,52 +449,43 @@ const calculatePeriodDates = (date, period) => {
  */
 const findMatchingCategory = (kpi, testCategories, categoryScoreMap) => {
   const kpiTitleLower = (kpi.title || '').toLowerCase().trim();
-  const kpiTitleWords = kpiTitleLower.split(/\s+/).filter(w => w.length > 2); // Filter out short words
-  
-  logger.debug(`Trying to match KPI "${kpi.title}" (lowercase: "${kpiTitleLower}") with available categories: ${Object.keys(categoryScoreMap).join(', ')}`);
+  const kpiTitleWords = kpiTitleLower.split(/\s+/).filter(w => w.length > 2);
   
   // Strategy 1: Exact match
   for (const [categoryName, scoreData] of Object.entries(categoryScoreMap)) {
     if (categoryName === kpiTitleLower) {
-      logger.info(`✓ Exact match found: KPI "${kpi.title}" -> Category "${scoreData.category_name}"`);
       return scoreData;
     }
   }
 
-  // Strategy 2: Contains match (either direction) - more lenient
+  // Strategy 2: Contains match (either direction)
   for (const [categoryName, scoreData] of Object.entries(categoryScoreMap)) {
     if (categoryName.includes(kpiTitleLower) || kpiTitleLower.includes(categoryName)) {
-      logger.info(`✓ Contains match found: KPI "${kpi.title}" -> Category "${scoreData.category_name}"`);
       return scoreData;
     }
   }
 
-  // Strategy 3: Word-based matching (check if significant words match)
+  // Strategy 3: Word-based matching
   for (const [categoryName, scoreData] of Object.entries(categoryScoreMap)) {
     const categoryWords = categoryName.split(/\s+/).filter(w => w.length > 2);
     const commonWords = kpiTitleWords.filter(w => categoryWords.includes(w));
     
     if (commonWords.length > 0 && commonWords.length >= Math.min(kpiTitleWords.length, categoryWords.length) * 0.5) {
-      logger.info(`✓ Word-based match found: KPI "${kpi.title}" -> Category "${scoreData.category_name}" (common words: ${commonWords.join(', ')})`);
       return scoreData;
     }
   }
 
-  // Strategy 4: Try matching with test categories table (if available)
-  for (const testCat of testCategories) {
-    const testCatName = (testCat.name || '').toLowerCase().trim();
-    if (testCatName === kpiTitleLower || 
-        testCatName.includes(kpiTitleLower) || 
-        kpiTitleLower.includes(testCatName)) {
-      const matchedScore = categoryScoreMap[testCatName];
-      if (matchedScore) {
-        logger.info(`✓ Test category match found: KPI "${kpi.title}" -> Category "${matchedScore.category_name}"`);
-        return matchedScore;
-      }
+  // Strategy 4: Substring matching (handles "Analytical" -> "Analytical Thinking")
+  for (const [categoryName, scoreData] of Object.entries(categoryScoreMap)) {
+    if (kpiTitleLower.length < categoryName.length && categoryName.includes(kpiTitleLower)) {
+      return scoreData;
+    }
+    if (categoryName.length < kpiTitleLower.length && kpiTitleLower.includes(categoryName)) {
+      return scoreData;
     }
   }
 
-  // Strategy 5: Fuzzy matching - check for similar keywords (expanded list)
+  // Strategy 5: Keyword matching
   const commonKeywords = [
     'leadership', 'communication', 'analytical', 'analytics', 'emotional', 'stability', 
     'thinking', 'problem', 'solving', 'team', 'work', 'performance', 
@@ -432,52 +497,12 @@ const findMatchingCategory = (kpi, testCategories, categoryScoreMap) => {
     if (kpiTitleLower.includes(keyword)) {
       for (const [categoryName, scoreData] of Object.entries(categoryScoreMap)) {
         if (categoryName.includes(keyword)) {
-          logger.info(`✓ Keyword match found: KPI "${kpi.title}" -> Category "${scoreData.category_name}" (keyword: ${keyword})`);
           return scoreData;
         }
       }
     }
   }
 
-  // Strategy 6: Check if KPI title is a substring of category name or vice versa
-  // This handles cases like "Analytical" matching "Analytical Thinking"
-  for (const [categoryName, scoreData] of Object.entries(categoryScoreMap)) {
-    // If KPI title is shorter, check if it's contained in category name
-    if (kpiTitleLower.length < categoryName.length) {
-      if (categoryName.includes(kpiTitleLower)) {
-        logger.info(`✓ Substring match found: KPI "${kpi.title}" -> Category "${scoreData.category_name}" (KPI is substring of category)`);
-        return scoreData;
-      }
-    }
-    // If category name is shorter, check if it's contained in KPI title
-    if (categoryName.length < kpiTitleLower.length) {
-      if (kpiTitleLower.includes(categoryName)) {
-        logger.info(`✓ Substring match found: KPI "${kpi.title}" -> Category "${scoreData.category_name}" (category is substring of KPI)`);
-        return scoreData;
-      }
-    }
-  }
-
-  // Strategy 6: Partial word matching (e.g., "Analytical" matches "Analytical Thinking")
-  for (const [categoryName, scoreData] of Object.entries(categoryScoreMap)) {
-    const categoryWords = categoryName.split(/\s+/);
-    const kpiWords = kpiTitleLower.split(/\s+/);
-    
-    // Check if any significant word from KPI appears in category name
-    for (const kpiWord of kpiWords) {
-      if (kpiWord.length > 3) { // Only check words longer than 3 characters
-        for (const catWord of categoryWords) {
-          if (catWord.toLowerCase().includes(kpiWord) || kpiWord.includes(catWord.toLowerCase())) {
-            logger.info(`✓ Partial word match found: KPI "${kpi.title}" -> Category "${scoreData.category_name}" (word: ${kpiWord})`);
-            return scoreData;
-          }
-        }
-      }
-    }
-  }
-
-  // If no match found, return null (KPI won't be calculated from this test)
-  logger.warn(`✗ No match found for KPI "${kpi.title}". Available categories: ${Object.keys(categoryScoreMap).join(', ')}`);
   return null;
 };
 
@@ -522,9 +547,10 @@ const storeKPIPerformance = async (data) => {
           existing[0].id
         ]
       );
+      logger.debug(`Updated existing KPI performance record ${existing[0].id}`);
     } else {
       // Insert new record
-      await db.pool.execute(
+      const [result] = await db.pool.execute(
         `INSERT INTO kpi_performance 
          (company_id, employee_type, employee_id, kpi_id, kra_id, 
           period_start, period_end, target_value, actual_value, 
@@ -546,6 +572,7 @@ const storeKPIPerformance = async (data) => {
           data.comments
         ]
       );
+      logger.debug(`Created new KPI performance record ${result.insertId}`);
     }
   } catch (error) {
     logger.error('Error storing KPI performance:', error);
@@ -585,9 +612,10 @@ const storeKRAPerformanceSummary = async (data) => {
           existing[0].id
         ]
       );
+      logger.debug(`Updated existing KRA performance summary ${existing[0].id}`);
     } else {
       // Insert new record
-      await db.pool.execute(
+      const [result] = await db.pool.execute(
         `INSERT INTO kra_performance_summary 
          (company_id, employee_type, employee_id, kra_id, 
           period_start, period_end, total_kpis, completed_kpis,
@@ -609,6 +637,7 @@ const storeKRAPerformanceSummary = async (data) => {
           data.reviewComments
         ]
       );
+      logger.debug(`Created new KRA performance summary ${result.insertId}`);
     }
   } catch (error) {
     logger.error('Error storing KRA performance summary:', error);
@@ -619,4 +648,3 @@ const storeKRAPerformanceSummary = async (data) => {
 module.exports = {
   calculateAndStoreKRAKPIPerformance
 };
-
